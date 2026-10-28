@@ -50,8 +50,13 @@ function parseEnvelope(stdout) {
 export function createLark({ run, dryRun = false, log = null }) {
   // Reads always execute, even under dryRun, so `--dry-run` still exercises
   // real polling against Feishu.
-  const call = async (args) => {
-    const res = (await run('lark-cli', [...args, ...IDENTITY])) ?? {};
+  //
+  // Free-form bodies must not travel in argv: on Windows the CLI is an npm
+  // `.cmd` shim, so the runner needs `shell: true`, and long Chinese bodies can
+  // also exceed the command-line limit. Bodies go through stdin instead.
+  const call = async (args, stdin) => {
+    const opts = stdin === undefined ? {} : { stdin };
+    const res = (await run('lark-cli', [...args, ...IDENTITY], opts)) ?? {};
     const stdout = typeof res.stdout === 'string' ? res.stdout : '';
     if (stdout.trim() === '') {
       // stderr may be undefined/empty; the exit code still tells the story.
@@ -76,11 +81,14 @@ export function createLark({ run, dryRun = false, log = null }) {
           container_id_type: 'chat',
           container_id: safeChatId,
           page_size: pageSize,
-          sort_type: 'ByCreateTimeAsc',
+          // Asc returns the chat's oldest page, so a single-page poll would
+          // never observe new messages once the chat exceeds one page.
+          sort_type: 'ByCreateTimeDesc',
         }),
       ]);
-      // Already ascending by create_time; never re-sort client-side.
-      return data.items ?? [];
+      // The page arrives newest-first; callers (and the poll cursor) depend on
+      // ascending create_time order, so flip it back.
+      return [...(data.items ?? [])].reverse();
     },
 
     async reply(messageId, text) {
@@ -89,14 +97,18 @@ export function createLark({ run, dryRun = false, log = null }) {
         log?.info?.(`[dry-run] reply ${safeMessageId}: ${String(text).slice(0, 80)}`);
         return { messageId: 'dry-run' };
       }
-      const data = await call([
-        'api',
-        'POST',
-        `${MESSAGES_PATH}/${safeMessageId}/reply`,
+      const data = await call(
+        [
+          'api',
+          'POST',
+          `${MESSAGES_PATH}/${safeMessageId}/reply`,
+          // `-` tells the CLI to read the body from stdin.
+          '--data',
+          '-',
+        ],
         // `content` is a JSON string, not an object.
-        '--data',
         JSON.stringify({ content: textContent(text), msg_type: 'text' }),
-      ]);
+      );
       return { messageId: data.message_id ?? '' };
     },
 
@@ -106,15 +118,18 @@ export function createLark({ run, dryRun = false, log = null }) {
         log?.info?.(`[dry-run] send ${safeChatId}: ${String(text).slice(0, 80)}`);
         return { messageId: 'dry-run' };
       }
-      const data = await call([
-        'api',
-        'POST',
-        MESSAGES_PATH,
-        '--params',
-        JSON.stringify({ receive_id_type: 'chat_id' }),
-        '--data',
+      const data = await call(
+        [
+          'api',
+          'POST',
+          MESSAGES_PATH,
+          '--params',
+          JSON.stringify({ receive_id_type: 'chat_id' }),
+          '--data',
+          '-',
+        ],
         JSON.stringify({ receive_id: safeChatId, msg_type: 'text', content: textContent(text) }),
-      ]);
+      );
       return { messageId: data.message_id ?? '' };
     },
 

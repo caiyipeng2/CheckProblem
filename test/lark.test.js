@@ -14,9 +14,9 @@ const jsonFlag = (args, name) => JSON.parse(flag(args, name));
 
 function capture(respond) {
   const calls = [];
-  const run = async (cmd, args) => {
-    calls.push({ cmd, args });
-    return respond({ cmd, args, index: calls.length - 1 });
+  const run = async (cmd, args, opts) => {
+    calls.push({ cmd, args, opts });
+    return respond({ cmd, args, opts, index: calls.length - 1 });
   };
   return { calls, run };
 }
@@ -37,30 +37,54 @@ const message = (id, createTime, text) => ({
 
 const ITEMS = [message('om_1', '1793162767000', '先'), message('om_2', '1793162767785', '后')];
 
-test('listMessages calls the raw api endpoint with chat params and returns data.items unchanged', async () => {
+test('listMessages calls the raw api endpoint with chat params and returns items oldest-first', async () => {
+  // The API page is newest-first; the adapter must flip it back to ascending.
   const { calls, run } = capture(() =>
-    envelope({ items: ITEMS, has_more: false, page_token: '' }),
+    envelope({ items: [...ITEMS].reverse(), has_more: false, page_token: '' }),
   );
   const lark = createLark({ run });
 
   const msgs = await lark.listMessages('oc_x');
 
   assert.equal(calls.length, 1);
-  const { cmd, args } = calls[0];
+  const { cmd, args, opts } = calls[0];
   assert.equal(cmd, 'lark-cli');
   assert.deepEqual(args.slice(0, 3), ['api', 'GET', '/open-apis/im/v1/messages']);
   assert.ok(args.includes('--params'));
   assert.ok(args.includes('--json'));
   assert.equal(flag(args, '--as'), 'user');
+  assert.deepEqual(opts, {});
 
   const params = jsonFlag(args, '--params');
   assert.equal(params.container_id, 'oc_x');
   assert.equal(params.container_id_type, 'chat');
-  assert.equal(params.sort_type, 'ByCreateTimeAsc');
+  assert.equal(params.sort_type, 'ByCreateTimeDesc');
   assert.equal(params.page_size, 20);
 
-  // Server order is preserved verbatim: no client-side re-sort or mapping.
   assert.deepEqual(msgs, ITEMS);
+});
+
+test('listMessages requests the newest-first sort type', async () => {
+  const { calls, run } = capture(() => envelope({ items: [] }));
+  const lark = createLark({ run });
+
+  await lark.listMessages('oc_x');
+
+  assert.equal(jsonFlag(calls[0].args, '--params').sort_type, 'ByCreateTimeDesc');
+});
+
+test('listMessages reverses a newest-first page into ascending create_time order', async () => {
+  const newestFirst = [
+    message('om_3', '1793162768000', '三'),
+    message('om_2', '1793162767785', '二'),
+    message('om_1', '1793162767000', '一'),
+  ];
+  const { run } = capture(() => envelope({ items: newestFirst, has_more: false, page_token: '' }));
+  const lark = createLark({ run });
+
+  const msgs = await lark.listMessages('oc_x');
+
+  assert.deepEqual(msgs.map((m) => m.message_id), ['om_1', 'om_2', 'om_3']);
 });
 
 test('listMessages passes pageSize through and tolerates a missing items field', async () => {
@@ -77,7 +101,7 @@ test('listMessages still runs real reads when dryRun is enabled', async () => {
   let called = 0;
   const run = async () => {
     called += 1;
-    return envelope({ items: ITEMS, has_more: false, page_token: '' });
+    return envelope({ items: [...ITEMS].reverse(), has_more: false, page_token: '' });
   };
   const lark = createLark({ run, dryRun: true });
 
@@ -85,7 +109,7 @@ test('listMessages still runs real reads when dryRun is enabled', async () => {
   assert.equal(called, 1);
 });
 
-test('reply posts a text body JSON string and returns the new message id', async () => {
+test('reply posts a text body JSON string on stdin and returns the new message id', async () => {
   const { calls, run } = capture(() => envelope({ message_id: 'om_reply' }));
   const lark = createLark({ run });
 
@@ -93,16 +117,22 @@ test('reply posts a text body JSON string and returns the new message id', async
 
   assert.deepEqual(res, { messageId: 'om_reply' });
   assert.equal(calls.length, 1);
-  const { cmd, args } = calls[0];
+  const { cmd, args, opts } = calls[0];
   assert.equal(cmd, 'lark-cli');
   assert.deepEqual(args.slice(0, 3), ['api', 'POST', '/open-apis/im/v1/messages/om_1/reply']);
   assert.equal(flag(args, '--as'), 'user');
   assert.ok(args.includes('--json'));
 
-  const body = jsonFlag(args, '--data');
-  assert.equal(body.msg_type, 'text');
+  const expected = { content: '{"text":"hello"}', msg_type: 'text' };
+  // The body must not leak into argv, where the Windows shell would see it.
+  assert.equal(args.includes(JSON.stringify(expected)), false);
+  assert.equal(args.some((arg) => String(arg).includes('hello')), false);
+  assert.equal(flag(args, '--data'), '-');
+
+  assert.equal(typeof opts.stdin, 'string');
+  const body = JSON.parse(opts.stdin);
+  assert.deepEqual(body, expected);
   assert.equal(typeof body.content, 'string');
-  assert.equal(body.content, '{"text":"hello"}');
 });
 
 test('reply is suppressed under dryRun, logs the text, and never calls run', async () => {
@@ -119,24 +149,29 @@ test('reply is suppressed under dryRun, logs the text, and never calls run', asy
   assert.match(seen[0], /hello/);
 });
 
-test('send uses receive_id_type chat_id and carries the chat in the body', async () => {
+test('send uses receive_id_type chat_id and carries the chat in the stdin body', async () => {
   const { calls, run } = capture(() => envelope({ message_id: 'om_sent' }));
   const lark = createLark({ run });
 
   const res = await lark.send('oc_x', '通知');
 
   assert.deepEqual(res, { messageId: 'om_sent' });
-  const { cmd, args } = calls[0];
+  const { cmd, args, opts } = calls[0];
   assert.equal(cmd, 'lark-cli');
   assert.deepEqual(args.slice(0, 3), ['api', 'POST', '/open-apis/im/v1/messages']);
   assert.equal(flag(args, '--as'), 'user');
   assert.ok(args.includes('--json'));
   assert.deepEqual(jsonFlag(args, '--params'), { receive_id_type: 'chat_id' });
 
-  const body = jsonFlag(args, '--data');
-  assert.equal(body.receive_id, 'oc_x');
-  assert.equal(body.msg_type, 'text');
-  assert.equal(body.content, '{"text":"通知"}');
+  const expected = { receive_id: 'oc_x', msg_type: 'text', content: '{"text":"通知"}' };
+  assert.equal(args.includes(JSON.stringify(expected)), false);
+  assert.equal(args.some((arg) => String(arg).includes('通知')), false);
+  assert.equal(flag(args, '--data'), '-');
+
+  assert.equal(typeof opts.stdin, 'string');
+  const body = JSON.parse(opts.stdin);
+  assert.deepEqual(body, expected);
+  assert.equal(typeof body.content, 'string');
 });
 
 test('send is suppressed under dryRun and never calls run', async () => {
@@ -189,12 +224,13 @@ test('getSenderName resolves data.user.name via contact +get-user', async () => 
   const lark = createLark({ run });
 
   assert.equal(await lark.getSenderName('ou_human'), '南柯');
-  const { cmd, args } = calls[0];
+  const { cmd, args, opts } = calls[0];
   assert.equal(cmd, 'lark-cli');
   assert.deepEqual(args.slice(0, 2), ['contact', '+get-user']);
   assert.equal(flag(args, '--user-id'), 'ou_human');
   assert.equal(flag(args, '--as'), 'user');
   assert.ok(args.includes('--json'));
+  assert.deepEqual(opts, {});
 });
 
 test('getSenderName returns an empty string instead of throwing', async () => {

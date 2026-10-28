@@ -19,13 +19,18 @@ export function initialState(nowMs = Date.now()) {
 }
 
 // A cursor is usable only when markSeen can compare it: a finite timestamp and
-// a string id. Anything else would silently freeze the poller, so reject it and
-// let loadState fall back to a fresh cursor.
+// a string id. Number(...) would coerce null/''/false/[] to 0, which would make
+// the whole chat history look unseen, so accept only an actual finite number or
+// a fully numeric string.
 function normalizeCursor(raw) {
   if (raw === null || typeof raw !== 'object') return null;
-  if (!Number.isFinite(Number(raw.createTimeMs))) return null;
   if (typeof raw.messageId !== 'string') return null;
-  return { createTimeMs: Number(raw.createTimeMs), messageId: raw.messageId };
+  const value = raw.createTimeMs;
+  const usable =
+    (typeof value === 'number' && Number.isFinite(value)) ||
+    (typeof value === 'string' && /^\d+$/.test(value));
+  if (!usable) return null;
+  return { createTimeMs: Number(value), messageId: raw.messageId };
 }
 
 export function loadState(file, nowMs = Date.now()) {

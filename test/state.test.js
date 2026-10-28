@@ -96,6 +96,50 @@ test('loadState normalizes a numeric-string cursor to a number', (t) => {
   assert.equal(s.lastSeen.messageId, 'om_1');
 });
 
+test('loadState rejects a null cursor timestamp instead of coercing it to 0', (t) => {
+  const file = tmpFile(t);
+  saveState(file, {
+    version: 1,
+    startedAt: 1,
+    lastSeen: { createTimeMs: null, messageId: '' },
+    job: null,
+  });
+  // A zero cursor would make the whole chat history look unseen.
+  assert.deepEqual(loadState(file, 6000), initialState(6000));
+});
+
+test('loadState still loads a fully numeric string cursor as a number', (t) => {
+  const file = tmpFile(t);
+  saveState(file, {
+    version: 1,
+    startedAt: 1,
+    lastSeen: { createTimeMs: '7000', messageId: 'om_1' },
+    job: null,
+  });
+  const s = loadState(file, 999);
+  assert.equal(s.lastSeen.createTimeMs, 7000);
+  assert.equal(typeof s.lastSeen.createTimeMs, 'number');
+  assert.equal(s.lastSeen.messageId, 'om_1');
+});
+
+test('loadState rejects every cursor timestamp that only coercion would make numeric', (t) => {
+  const invalid = [null, '', ' ', false, [], {}, NaN, Infinity, ' 7000 ', '12abc', '0x10'];
+  const file = tmpFile(t);
+  for (const createTimeMs of invalid) {
+    saveState(file, {
+      version: 1,
+      startedAt: 1,
+      lastSeen: { createTimeMs, messageId: 'om_1' },
+      job: null,
+    });
+    assert.deepEqual(
+      loadState(file, 7000),
+      initialState(7000),
+      `expected rejection for ${JSON.stringify(createTimeMs)}`,
+    );
+  }
+});
+
 test('a normalized cursor still advances when a newer message arrives', (t) => {
   const file = tmpFile(t);
   saveState(file, {

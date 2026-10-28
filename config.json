@@ -11,6 +11,6 @@
     "dir": "repo/Idle_Outpost",
     "branch": "master"
   },
-  "analyze": { "timeoutSec": 600, "command": "codex" },
+  "analyze": { "timeoutSec": 900, "command": "codex" },
   "dryRun": false
 }

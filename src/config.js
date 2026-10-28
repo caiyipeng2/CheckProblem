@@ -7,7 +7,7 @@ const DEFAULTS = {
   pollIntervalSec: 15,
   contextMessages: 5,
   maxReplyChars: 4000,
-  analyze: { timeoutSec: 600, command: 'codex' },
+  analyze: { timeoutSec: 900, command: 'codex' },
   dryRun: false,
 };
 

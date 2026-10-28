@@ -54,12 +54,19 @@ const engine = createEngine({
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+// Spec §11: five consecutive failures is the alarm threshold. An expired token
+// is the common cause and it does not clear itself, so say so loudly — but keep
+// polling, because a network blip looks identical from here.
+const ALARM_AFTER_FAILURES = 5;
+
 async function main() {
   log.info(`starting (once=${once}, dryRun=${config.dryRun}, chat=${config.chatId})`);
+  let failures = 0;
 
   for (;;) {
     try {
       await engine.tick();
+      failures = 0;
     } catch (err) {
       // A revoked scope cannot recover by retrying; everything else is one bad
       // tick and the loop must survive it.
@@ -70,7 +77,13 @@ async function main() {
         process.exitCode = 1;
         return;
       }
-      log.error(`tick failed: ${err?.message ?? err}`);
+      failures += 1;
+      log.error(`tick failed (${failures} in a row): ${err?.message ?? err}`);
+      if (failures === ALARM_AFTER_FAILURES) {
+        log.error(
+          `${failures} consecutive failures — if the cause is credentials, run lark-cli auth login and restart`,
+        );
+      }
     }
 
     if (once) return;

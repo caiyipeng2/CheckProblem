@@ -61,6 +61,14 @@ test('clipForReply clips the body but keeps the footer intact', () => {
   assert.ok(res.full.startsWith(analysis.slice(0, 20)));
 });
 
+test('clipForReply keeps the footer on its own paragraph', () => {
+  const analysis = '【结论】奖励未发放，需要补发。'.repeat(40);
+  const res = clipForReply({ analysis, commit: 'a1b2c3d', confirmer: '南柯', maxChars: 200 });
+  assert.equal(res.truncated, true);
+  assert.match(res.text, /\n\n—— 蔡龙自动分析/);
+  assert.doesNotMatch(res.text, /[^。\n]—— 蔡龙自动分析/);
+});
+
 test('clipForReply keeps a footer longer than maxChars instead of cutting it', () => {
   const analysis = '【结论】奖励未发放，需要补发。'.repeat(40);
   const res = clipForReply({ analysis, commit: 'a1b2c3d', confirmer: '南柯', maxChars: 10 });

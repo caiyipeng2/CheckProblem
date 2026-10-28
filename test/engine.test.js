@@ -199,8 +199,9 @@ test('a clipped reply keeps the footer and the archive holds the full text', asy
   const footer = '—— 蔡龙自动分析 · master@abc1234 · 由 运营A 确认';
   const reply = h.replies.at(-1);
   assert.equal(reply.id, 'om_1');
-  assert.equal(reply.text, `【结论】配置缺失，掉落表没${footer}`);
+  assert.equal(reply.text, `【结论】配置缺失，掉落\n\n${footer}`);
   assert.ok(reply.text.endsWith(footer), 'the clipped reply keeps the footer');
+  assert.ok(reply.text.length <= 50, 'the clipped reply respects maxReplyChars');
 
   const archived = readFileSync(join(jobsDir, 'om_1.md'), 'utf8');
   assert.equal(archived, `${ANALYSIS}\n\n${footer}`);

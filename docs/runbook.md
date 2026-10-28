@@ -30,7 +30,7 @@ node bin/checkproblem.js
 node bin/checkproblem.js --once
 ```
 
-只跑一轮就退出。正常退出码为 0；缺 scope 或启动期致命错误为 1。若这一轮发现了触发消息，服务会发出确认提示并把 `awaiting` 任务写进 `state/state.json` 后退出——要完成「确认 → 分析」，需要常驻进程继续处理，或在成员回复「确认」后再执行一次 `--once`。
+只跑一轮就退出。正常退出码为 0——注意**单轮内的 tick 失败（网络、超时等）也只写日志，退出码仍是 0**，要确认这一轮是否真的成功得看日志；缺 scope 或启动期致命错误才是 1。若这一轮发现了触发消息，服务会发出确认提示并把 `awaiting` 任务写进 `state/state.json` 后退出——要完成「确认 → 分析」，需要常驻进程继续处理，或在成员回复「确认」后再执行一次 `--once`。
 
 试运行：
 
@@ -66,7 +66,7 @@ node bin/checkproblem.js --config D:\path\config.local.json
 
 | 项目 | 值 | 说明 |
 |---|---|---|
-| 轮询间隔 | 15 秒 | `pollIntervalSec`；上一轮还没结束时本轮跳过；若当时没有 `running` 的分析任务，会记一条 `poll still running after …ms, skipping this tick` 警告（每次重叠只记一次） |
+| 轮询间隔 | 15 秒 | `pollIntervalSec`；主循环是串行的（`await` 上一轮再睡 15 秒），轮询不会重叠。分析进行期间不轮询，直到该轮结束 |
 | 确认窗口 | 600 秒 | `confirmTimeoutSec`；超时后回复 `查询请求已超时，如需分析请重新发起。` |
 | 子进程默认超时 | 120 秒 | 未单独指定预算的调用：lark-cli 读写、git reset/clean/rev-parse、通讯录查询 |
 | git clone / fetch | 1800 秒 | 网络操作，超时按失败处理 |
@@ -81,8 +81,8 @@ node bin/checkproblem.js --config D:\path\config.local.json
 | 现象 | 原因 | 处理 |
 |---|---|---|
 | 进程退出，退出码 1；日志出现 `missing scopes: … — run lark-cli auth login --scope "<scope>"` | 用户身份缺少某个 API scope（首次部署、换租户、授权被撤销）。缺 scope 无法靠重试恢复，服务会主动退出而不是空转 | 按日志列出的 scope 逐个补授权：`lark-cli auth login --scope "<scope>"`，然后重启服务 |
-| 日志持续出现 `tick failed: …`，错误信息为 token 无效/过期、鉴权失败一类 | 用户 access token 过期或被撤销。服务不会自己重新登录，只会每轮记一条失败 | 重新执行 `lark-cli auth login`（必要时带上原有 scope），观察下一轮日志；仍失败再重启服务 |
-| 群里有新消息但服务毫无反应，日志只有启动行或没有新事件 | `config.json` 的 `chatId` 不是目标群；`triggerKeyword` 与消息里的写法不一致；或这些消息早于 `state/state.json` 的游标（首次启动、重置状态、停机期间的消息都会被跳过） | 核对 `chatId` 和 `triggerKeyword`；把消息时间与 `state/state.json` 的 `lastSeen.createTimeMs` 对比；停服删除 `state/state.json` 后重启（游标重置为启动时刻），再发一条含触发词的新消息 |
+| 日志持续出现 `tick failed (N in a row): …`，错误信息为 token 无效/过期、鉴权失败一类 | 用户 access token 过期或被撤销。服务不会自己重新登录，只会每轮记一条失败；连续 5 次会额外打一行告警 | 重新执行 `lark-cli auth login`（必要时带上原有 scope），观察下一轮日志；仍失败再重启服务 |
+| 群里有新消息但服务毫无反应，日志只有启动行或没有新事件 | `config.json` 的 `chatId` 不是目标群；`triggerKeyword` 与消息里的写法不一致；或游标已经越过这条消息（服务停机期间收到的、且仍在新一页里的消息会在重启后被处理；超出最新 50 条的旧消息则看不到） | 核对 `chatId` 和 `triggerKeyword`；把消息时间与 `state/state.json` 的 `lastSeen.createTimeMs` 对比；停服删除 `state/state.json` 后重启（游标重置为启动时刻），再发一条含触发词的新消息 |
 | 群回复 `分析失败：git clone failed: …` 或 `分析失败：git fetch failed: …` | 访问仓库失败、磁盘不足、git 凭据失效，或 `repo/Idle_Outpost` 是上次中断留下的半成品目录 | clone/fetch 预算 30 分钟，仓库约 4 GB：检查网络、磁盘空间、`repo.url` 和 git 凭据。若目录存在但不是有效 clone（没有 `.git` 或内容不全），停服后删除整个 `repo/Idle_Outpost` 让服务重新 clone |
 | 群回复 `分析失败：codex exec failed (exit 124): …`，错误详情里可能带 `分析超时（900 秒）` | codex 超过 `analyze.timeoutSec`（默认 900 秒）被终止 | 原任务已结束，重新发起问题即可。频繁超时可提高 `analyze.timeoutSec` 后重启，并检查 codex 登录态、网络和模型配额。分析是只读的，重跑没有副作用 |
 | 群回复其它 `分析失败：…` | git reset/clean 失败、codex 非零退出或空输出、回复消息失败等 | 按日志中 `analysis failed for <message_id>: …` 的完整错误处理；修好后重新发触发消息（原触发消息已标记为已读，不会自动重来） |
@@ -160,5 +160,6 @@ schtasks /Delete /TN "CheckProblem" /F
 
 - 机器人无法加入该群，`im +…` 快捷命令所需的 `im:message.reactions:read` 在本租户也无法授予。服务只能用个人身份调原始 API，确认只能靠群成员文字回复（`确认` / `取消`，另接受 `同意`、`开始`、`1` / `忽略`、`不用` 等少量同义词），没有卡片按钮。
 - 同一时间只处理一个任务：等待确认期间，新的「蔡龙」提问会被当作普通消息跳过，不会排队；分析进行中到达的提问会在本轮结束后由下一次轮询处理。
-- 两次轮询之间如果冒出超过约 50 条消息，触发消息可能已经不在最新一页（固定 50 条、不翻页）；游标会推进到已读到的最新消息，这条提问就被漏掉。
+- 两次轮询之间如果冒出超过约 50 条消息，触发消息可能已经不在最新一页（固定 50 条、不翻页）；游标会推进到已读到的最新消息，这条提问就被漏掉。轮询是串行的：一次分析期间（最长 900 秒）完全不轮询，所以真正的「漏消息窗口」是这次分析加上前后各一个轮询间隔，而不是 15 秒。
 - 分析是只读的：codex 在 `-s read-only` 沙箱里运行，只检索代码，不会修改 clone；真正的写操作只有 git 同步。
+- 游标跨重启保留：服务停机期间群里的消息不会丢，重启后凡是仍在最新 50 条内的，会照常触发（可能补发一次确认提示）。要避免这种补发，停服删除 `state/state.json`，重启后只处理启动之后的消息。

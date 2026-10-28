@@ -22,11 +22,14 @@ export function truncate(text, max) {
 
 // Clips the analysis body only, so provenance survives even when the reply is
 // too long; if maxChars is smaller than the footer, the reply is just the
-// footer and may exceed maxChars rather than lose attribution.
+// footer and may exceed maxChars rather than lose attribution. The blank line
+// before the footer is part of the budget, so a clipped reply never runs the
+// last sentence straight into the em dashes.
 export function clipForReply({ analysis, commit, confirmer, maxChars }) {
   const full = formatResult({ analysis, commit, confirmer });
   if (full.length <= maxChars) return { text: full, truncated: false, full };
   const foot = footer(commit, confirmer);
-  const body = String(analysis ?? '').trim().slice(0, Math.max(0, maxChars - foot.length));
-  return { text: body + foot, truncated: true, full };
+  const budget = maxChars - foot.length - 2;
+  const body = budget > 0 ? String(analysis ?? '').trim().slice(0, budget) : '';
+  return { text: body ? `${body}\n\n${foot}` : foot, truncated: true, full };
 }

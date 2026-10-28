@@ -32,7 +32,7 @@ const MAX_FILES = 8;
 const GREP_LINES_PER_FILE = 8;
 const DIGEST_LINES_PER_FILE = 3;
 const MAX_LINE_CHARS = 200;
-const MAX_DIGEST_CHARS = 6000;
+const MAX_DIGEST_CHARS = 16000;
 
 // Function words that make a bigram useless as a search term: every file
 // contains 没有/这个/一下, and a term that matches everything ranks nothing.
@@ -166,8 +166,8 @@ function renderDigest(terms, files) {
   return lines.join('\n').trim();
 }
 
-const SNIPPET_RADIUS = 20;
-const SNIPPET_MAX_PER_FILE = 4000;
+const SNIPPET_RADIUS = 12;
+const SNIPPET_MAX_PER_FILE = 3000;
 
 // Code around each hit, because a model reasoning over a window beats a model
 // that has to grep for itself. The radius is small enough that eight files stay

@@ -88,6 +88,7 @@ function harness(overrides = {}) {
       calls.prompts.push(prompt);
       return { text: ANALYSIS };
     },
+    retrieve: overrides.retrieve,
     ...overrides,
   });
 
@@ -534,4 +535,43 @@ test('unrelated chatter only advances the cursor', async () => {
   assert.equal(h.replies.length, 0);
   assert.equal(h.state.job, null);
   assert.deepEqual(h.state.lastSeen, { createTimeMs: 200, messageId: 'om_2' });
+});
+
+test('the local search digest reaches the prompt sent to the model', async () => {
+  const h = harness({
+    retrieve: async (question) => ({
+      terms: ['奖励'],
+      files: [{ path: 'Assets/Config/Reward.cs', lines: [{ line: 12, text: 'reward_1001' }] }],
+      digest: 'Assets/Config/Reward.cs\n  12: reward_1001',
+      note: '',
+    }),
+  });
+  h.state.job = awaitingJob();
+  h.state.lastSeen = { createTimeMs: NOW, messageId: 'om_1' };
+  h.setBatch([msg('om_2', NOW + 100, '确认', 'ou_ops')]);
+
+  await h.engine.tick();
+
+  assert.equal(h.calls.prompts.length, 1);
+  assert.match(h.calls.prompts[0], /【本地检索线索】/);
+  assert.match(h.calls.prompts[0], /reward_1001/);
+  assert.ok(h.logs.info.some((line) => /search: 1 terms, 1 files/.test(line)));
+});
+
+test('a failing search does not cost the analysis', async () => {
+  const h = harness({
+    retrieve: async () => {
+      throw new Error('git exploded');
+    },
+  });
+  h.state.job = awaitingJob();
+  h.state.lastSeen = { createTimeMs: NOW, messageId: 'om_1' };
+  h.setBatch([msg('om_2', NOW + 100, '确认', 'ou_ops')]);
+
+  await h.engine.tick();
+
+  assert.equal(h.calls.prompts.length, 1, 'the analysis still runs');
+  assert.match(h.calls.prompts[0], /本地检索线索】（无/);
+  assert.ok(h.logs.warn.some((line) => /search failed: git exploded/.test(line)));
+  assert.equal(h.state.job, null);
 });

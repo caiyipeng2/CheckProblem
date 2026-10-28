@@ -38,7 +38,7 @@ function contextLine(msg) {
   return `${who}: ${extractPlainText(msg).trim().slice(0, CONTEXT_LINE_CHARS)}`;
 }
 
-export function createEngine({ config, lark, syncRepo, runAnalysis, state, clock, log, saveState }) {
+export function createEngine({ config, lark, syncRepo, runAnalysis, state, clock, log, saveState, retrieve }) {
   let inFlight = false;
   let firstTick = true;
   // Boundary of the running tick, and whether one skipped tick has already
@@ -82,7 +82,20 @@ export function createEngine({ config, lark, syncRepo, runAnalysis, state, clock
 
     try {
       const { commit } = await syncRepo();
-      const prompt = buildPrompt({ question: job.question, context: job.context });
+      // The clone moved, so the search runs after the sync. A failed search only
+      // costs precision: the model still gets the question.
+      let evidence = '';
+      if (typeof retrieve === 'function') {
+        try {
+          const found = await retrieve(job.question);
+          evidence = found?.digest ?? '';
+          log?.info?.(`search: ${found?.terms?.length ?? 0} terms, ${found?.files?.length ?? 0} files${found?.note ? ` (${found.note})` : ''}`);
+        } catch (err) {
+          log?.warn?.(`search failed: ${err?.message ?? err}`);
+        }
+      }
+
+      const prompt = buildPrompt({ question: job.question, context: job.context, evidence });
       const { text } = await runAnalysis(prompt);
       const { text: body, truncated, full } = clipForReply({
         analysis: text,

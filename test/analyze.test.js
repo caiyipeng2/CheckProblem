@@ -284,3 +284,23 @@ test('every argument an attempt produces survives the real runner quoting', asyn
   assert.equal(argv.some((arg) => arg.includes('"')), false, 'no argument may carry a quote character');
   assert.equal(argv.every((arg) => !/\s/.test(arg)), true, 'no argument may carry whitespace');
 });
+
+test('buildPrompt carries the local search clues and asks the model not to roam', async () => {
+  const { buildPrompt } = await import('../src/analyze.js');
+  const prompt = buildPrompt({
+    question: '奖励没到账',
+    context: [],
+    evidence: '命中关键词：奖励\nAssets/Config/Reward.cs\n  12: reward_1001',
+  });
+  assert.match(prompt, /【本地检索线索】/);
+  assert.match(prompt, /Assets\/Config\/Reward\.cs/);
+  assert.match(prompt, /reward_1001/);
+  assert.match(prompt, /不要遍历整个仓库/);
+});
+
+test('buildPrompt says so when the search found nothing', async () => {
+  const { buildPrompt } = await import('../src/analyze.js');
+  const prompt = buildPrompt({ question: '奖励没到账' });
+  assert.match(prompt, /本地检索线索】（无/);
+  assert.doesNotMatch(prompt, /Assets\/Config/);
+});

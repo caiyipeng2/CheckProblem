@@ -14,6 +14,7 @@ import { syncRepo } from '../src/repo.js';
 import { runAnalysis } from '../src/analyze.js';
 import { createEngine } from '../src/index.js';
 import { run } from '../src/runner.js';
+import { collectEvidence } from '../src/search.js';
 import { acquireLock, releaseLock } from '../src/lock.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -56,6 +57,7 @@ const engine = createEngine({
   log,
   saveState: (s) => saveState(config.paths.stateFile, s),
   syncRepo: () => syncRepo({ ...config.repo, run, log }),
+  retrieve: (question) => collectEvidence({ question, repoDir: config.repo.dir, run, log }),
   runAnalysis: (prompt) =>
     runAnalysis({
       prompt,

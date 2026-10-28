@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createEngine } from '../src/index.js';
@@ -184,6 +185,27 @@ test('a confirm runs the analysis and replies to the trigger with the footer', a
   assert.deepEqual(h.state.lastSeen, { createTimeMs: NOW + 100, messageId: 'om_2' });
 });
 
+test('a clipped reply keeps the footer and the archive holds the full text', async () => {
+  const jobsDir = mkdtempSync(join(tmpdir(), 'checkproblem-jobs-'));
+  const h = harness();
+  h.config.maxReplyChars = 50;
+  h.config.paths = { jobsDir };
+  h.state.job = awaitingJob();
+  h.state.lastSeen = { createTimeMs: NOW, messageId: 'om_1' };
+  h.setBatch([msg('om_2', NOW + 100, '确认', 'ou_ops')]);
+
+  await h.engine.tick();
+
+  const footer = '—— 蔡龙自动分析 · master@abc1234 · 由 运营A 确认';
+  const reply = h.replies.at(-1);
+  assert.equal(reply.id, 'om_1');
+  assert.equal(reply.text, `【结论】配置缺失，掉落表没${footer}`);
+  assert.ok(reply.text.endsWith(footer), 'the clipped reply keeps the footer');
+
+  const archived = readFileSync(join(jobsDir, 'om_1.md'), 'utf8');
+  assert.equal(archived, `${ANALYSIS}\n\n${footer}`);
+});
+
 test('a cancel replies with the notice and clears the job', async () => {
   const h = harness();
   h.state.job = awaitingJob();
@@ -216,6 +238,34 @@ test('an expired job times out before any messages are read', async () => {
   assert.deepEqual(h.replies, [{ id: 'om_1', text: TIMEOUT_NOTICE }]);
   assert.equal(h.state.job, null);
   assert.equal(h.saves.at(-1).job, null);
+});
+
+test('a failed timeout notice does not wedge the loop and a new trigger still works', async () => {
+  const h = harness();
+  h.state.job = awaitingJob({ expiresAt: NOW - 1 });
+  let failing = true;
+  h.lark.reply = async (id, text) => {
+    if (failing) throw new Error('reply api down');
+    h.replies.push({ id, text });
+    return { messageId: 'om_r1' };
+  };
+  h.setBatch([]);
+
+  await h.engine.tick();
+
+  assert.equal(h.state.job, null, 'the job is cleared even when the notice fails');
+  assert.equal(h.calls.list.length, 1, 'the tick still reaches the poll');
+  assert.ok(h.logs.error.some((line) => /cannot deliver notice/.test(line)));
+
+  failing = false;
+  h.setNow(NOW + 100);
+  h.setBatch([msg('om_9', NOW + 100, '蔡龙 再查一次')]);
+  await h.engine.tick();
+
+  assert.equal(h.calls.list.length, 2, 'the next tick polls normally');
+  assert.equal(h.state.job.status, 'awaiting');
+  assert.equal(h.state.job.triggerMessageId, 'om_9');
+  assert.deepEqual(h.replies, [{ id: 'om_9', text: CONFIRM_PROMPT }]);
 });
 
 test('an analysis failure replies with the reason and clears the job', async () => {
@@ -324,8 +374,29 @@ test('an interrupted running job is reported and cleared on the first tick only'
   assert.equal(h.state.job.status, 'awaiting');
   assert.equal(h.state.job.triggerMessageId, 'om_2');
 
+  // Re-seed a `running` job: after the first tick state.job is `awaiting`, so
+  // without this the assertion below would pass even if the firstTick guard
+  // were deleted.
+  h.state.job = { ...awaitingJob(), status: 'running', triggerMessageId: 'om_9' };
   await h.engine.tick();
   assert.equal(h.replies.length, 2, 'recovery must not repeat on later ticks');
+});
+
+test('a failed interrupted notice still clears the running job and keeps polling', async () => {
+  const h = harness();
+  h.state.job = { ...awaitingJob(), status: 'running', triggerMessageId: 'om_1' };
+  h.state.lastSeen = { createTimeMs: NOW, messageId: 'om_1' };
+  h.lark.reply = async () => {
+    throw new Error('message recalled');
+  };
+  h.setBatch([]);
+
+  await h.engine.tick();
+
+  assert.equal(h.state.job, null);
+  assert.equal(h.calls.list.length, 1);
+  assert.ok(h.logs.error.some((line) => /cannot deliver notice/.test(line)));
+  assert.equal(h.replies.length, 0);
 });
 
 test('a tick already in flight makes the next tick return immediately', async () => {

@@ -56,6 +56,16 @@ export function createEngine({ config, lark, syncRepo, runAnalysis, state, clock
     }
   }
 
+  // A notice is advisory: a recalled trigger or a flaky API must never change
+  // control flow, so callers clear and save the job before asking for it.
+  async function notice(messageId, text) {
+    try {
+      await lark.reply(messageId, text);
+    } catch (err) {
+      log?.error?.(`cannot deliver notice to ${messageId}: ${err?.message ?? err}`);
+    }
+  }
+
   async function runJob(msg) {
     const job = state.job;
     const triggerMessageId = job.triggerMessageId;
@@ -110,20 +120,22 @@ export function createEngine({ config, lark, syncRepo, runAnalysis, state, clock
       // A `running` job can only survive in the state file if the process died
       // mid-analysis: the result is unrecoverable, so say so once and move on.
       if (firstTick) {
-        firstTick = false;
         if (state.job?.status === 'running') {
-          log?.warn?.(`recovering interrupted analysis of ${state.job.triggerMessageId}`);
-          await lark.reply(state.job.triggerMessageId, INTERRUPTED_NOTICE);
+          const { triggerMessageId } = state.job;
+          log?.warn?.(`recovering interrupted analysis of ${triggerMessageId}`);
           state.job = null;
           saveState(state);
+          await notice(triggerMessageId, INTERRUPTED_NOTICE);
         }
+        firstTick = false;
       }
 
       if (state.job?.status === 'awaiting' && now > state.job.expiresAt) {
-        log?.info?.(`confirmation for ${state.job.triggerMessageId} timed out`);
-        await lark.reply(state.job.triggerMessageId, TIMEOUT_NOTICE);
+        const { triggerMessageId } = state.job;
+        log?.info?.(`confirmation for ${triggerMessageId} timed out`);
         state.job = null;
         saveState(state);
+        await notice(triggerMessageId, TIMEOUT_NOTICE);
       }
 
       const messages = await lark.listMessages(config.chatId, { pageSize: PAGE_SIZE });
@@ -141,11 +153,12 @@ export function createEngine({ config, lark, syncRepo, runAnalysis, state, clock
             return;
           }
           if (kind === 'cancel') {
-            log?.info?.(`cancel from ${senderId(message)} for ${state.job.triggerMessageId}`);
-            await lark.reply(state.job.triggerMessageId, CANCELLED_NOTICE);
+            const { triggerMessageId } = state.job;
+            log?.info?.(`cancel from ${senderId(message)} for ${triggerMessageId}`);
             state.job = null;
             markSeen(state, message);
             saveState(state);
+            await notice(triggerMessageId, CANCELLED_NOTICE);
             return;
           }
           // Anything else is chatter; keep scanning so a 确认 later in the same
@@ -178,7 +191,7 @@ export function createEngine({ config, lark, syncRepo, runAnalysis, state, clock
           question,
           context,
           promptMessageId: prompt?.messageId ?? '',
-          expiresAt: now + config.confirmTimeoutSec * 1000,
+          expiresAt: clock() + config.confirmTimeoutSec * 1000,
           confirmer: null,
         };
         markSeen(state, message);

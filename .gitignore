@@ -1,0 +1,6 @@
+repo/
+state/
+logs/
+node_modules/
+*.local.json
+lark-*.png

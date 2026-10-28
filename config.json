@@ -1,0 +1,16 @@
+{
+  "chatId": "oc_dd37d502d8e49d7e2f5f993a4841b819",
+  "selfOpenId": "ou_5c0950495c90be242b55e80eb847c7e7",
+  "triggerKeyword": "蔡龙",
+  "confirmTimeoutSec": 600,
+  "pollIntervalSec": 15,
+  "contextMessages": 5,
+  "maxReplyChars": 4000,
+  "repo": {
+    "url": "https://codeup.aliyun.com/5f2b9f02df9df74e36afc9ad/Idle_Outpost.git",
+    "dir": "repo/Idle_Outpost",
+    "branch": "master"
+  },
+  "analyze": { "timeoutSec": 600, "command": "codex" },
+  "dryRun": false
+}

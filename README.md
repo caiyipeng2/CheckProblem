@@ -6,12 +6,12 @@
 
 - 默认每 15 秒读取目标群最新一页消息；正文含「蔡龙」或 mention 显示名含「蔡龙」即触发（服务账号自己发的消息除外）。
 - 服务回复原消息，请任意群成员在 10 分钟内回复「确认」开始分析，回复「取消」放弃。
-- 确认后把 `repo/Idle_Outpost` 同步到 `master` 最新，再以只读沙箱运行 `codex exec`，回复【结论】【定位】【依据】【建议】和落款 `—— 蔡龙自动分析 · master@<sha> · 由 <确认人> 确认`。
+- 确认后把 `repo/Idle_Outpost` 同步到 `master` 最新，先用问题关键词在源码/配置里检索出少量相关文件，再以只读沙箱运行 `codex exec`，回复【结论】【定位】【依据】【建议】和落款 `—— 蔡龙自动分析 · master@<sha> · 由 <确认人> 确认`。
 - 同一时间只处理一个任务。分析中被杀留下的 `running` 任务不会重跑，下次启动会在原消息说明「上次分析中断，请重新发起」。
 
 ## 架构
 
-入口 `bin/checkproblem.js` 只做参数解析与依赖装配；`src/` 按职责分层：`config.js` 读取配置、校验必填项并解析路径，`logger.js` 写按天文件日志，`lark.js` 封装全部 `lark-cli api … --as user` 调用（拉消息、回复、查显示名），`trigger.js` 判定触发词与确认/取消并比较消息游标，`index.js` 是轮询状态机（确认、超时、单任务、崩溃恢复），`state.js` 持久化 `state/state.json`（临时文件 + 重命名），`repo.js` 维护专用 clone（clone / fetch / reset / clean），`analyze.js` 组装提示词、执行 `codex exec -s read-only` 并清洗输出，`reply.js` 管理固定提示语、结果落款与裁剪，`runner.js` 是所有子进程的唯一出口（参数转义、超时、整棵进程树终止），`lock.js` 保证单实例，`analyze.js` 按 `analyze.attempts` 顺序试多个模型（主引擎超时就换下一个，仍只读）。
+入口 `bin/checkproblem.js` 只做参数解析与依赖装配；`src/` 按职责分层：`config.js` 读取配置、校验必填项并解析路径，`logger.js` 写按天文件日志，`lark.js` 封装全部 `lark-cli api … --as user` 调用（拉消息、回复、查显示名），`trigger.js` 判定触发词与确认/取消并比较消息游标，`index.js` 是轮询状态机（确认、超时、单任务、崩溃恢复），`state.js` 持久化 `state/state.json`（临时文件 + 重命名），`repo.js` 维护专用 clone（clone / fetch / reset / clean），`search.js` 按问句关键词做一次本地 `git grep`、把命中片段压成线索摘要，`analyze.js` 把线索写进提示词、执行 `codex exec -s read-only` 并清洗输出，`reply.js` 管理固定提示语、结果落款与裁剪，`runner.js` 是所有子进程的唯一出口（参数转义、超时、整棵进程树终止），`lock.js` 保证单实例，`analyze.js` 按 `analyze.attempts` 顺序试多个模型（主引擎超时就换下一个，仍只读）。
 
 ## 快速开始
 

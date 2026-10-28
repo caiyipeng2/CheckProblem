@@ -41,6 +41,10 @@ function contextLine(msg) {
 export function createEngine({ config, lark, syncRepo, runAnalysis, state, clock, log, saveState }) {
   let inFlight = false;
   let firstTick = true;
+  // Boundary of the running tick, and whether one skipped tick has already
+  // been reported for this overlap.
+  let tickStartedAt = 0;
+  let overlapWarned = false;
 
   // The adapter never throws here, but a broken lookup must not cost us the
   // analysis: fall back to the raw open_id.
@@ -111,8 +115,19 @@ export function createEngine({ config, lark, syncRepo, runAnalysis, state, clock
   }
 
   async function tick() {
-    if (inFlight) return;
+    if (inFlight) {
+      // A stalled child would otherwise stall the service silently: the timer
+      // keeps firing, every tick returns instantly and nothing is written.
+      // One line per overlap makes that visible without flooding the log, and
+      // a legitimately running analysis is not a stall at all.
+      if (!overlapWarned && state.job?.status !== 'running') {
+        overlapWarned = true;
+        log?.warn?.(`poll still running after ${Math.max(0, clock() - tickStartedAt)}ms, skipping this tick`);
+      }
+      return;
+    }
     inFlight = true;
+    tickStartedAt = clock();
 
     try {
       const now = clock();
@@ -206,6 +221,7 @@ export function createEngine({ config, lark, syncRepo, runAnalysis, state, clock
       }
     } finally {
       inFlight = false;
+      overlapWarned = false;
     }
   }
 

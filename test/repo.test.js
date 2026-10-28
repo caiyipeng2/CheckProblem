@@ -16,22 +16,26 @@ function tmpDir(t) {
 // Every test injects this mock; real git must never run in the suite.
 function recordRun(reply) {
   const calls = [];
-  const run = async (cmd, args) => {
+  const options = [];
+  const run = async (cmd, args, opts) => {
     calls.push([cmd, ...args]);
+    options.push(opts);
     return typeof reply === 'function' ? reply(cmd, args) : reply;
   };
-  return { run, calls };
+  return { run, calls, options };
 }
 
 test('clones when directory is not a git repo', async (t) => {
   const base = tmpDir(t);
   const dir = join(base, 'clone');
-  const { run, calls } = recordRun({ code: 0, stdout: 'a1b2c3d\n', stderr: '' });
+  const { run, calls, options } = recordRun({ code: 0, stdout: 'a1b2c3d\n', stderr: '' });
   const res = await syncRepo({ dir, url: URL, branch: 'master', run });
   assert.equal(res.commit, 'a1b2c3d');
   assert.equal(calls[0][0], 'git');
   assert.deepEqual(calls[0].slice(1, 3), ['clone', '--branch']);
   assert.deepEqual(calls[0], ['git', 'clone', '--branch', 'master', URL, dir]);
+  // A multi-gigabyte clone needs far more than the runner's default budget.
+  assert.ok(options[0].timeoutMs >= 60_000, `clone budget was ${options[0].timeoutMs}`);
   assert.deepEqual(calls.at(-1), ['git', '-C', dir, 'rev-parse', '--short', 'HEAD']);
 });
 
@@ -39,7 +43,7 @@ test('fetches and resets when directory already exists', async (t) => {
   const base = tmpDir(t);
   const dir = join(base, 'clone');
   mkdirSync(join(dir, '.git'), { recursive: true });
-  const { run, calls } = recordRun((cmd, args) =>
+  const { run, calls, options } = recordRun((cmd, args) =>
     args.includes('rev-parse')
       ? { code: 0, stdout: 'deadbee\n', stderr: '' }
       : { code: 0, stdout: '', stderr: '' },
@@ -54,6 +58,9 @@ test('fetches and resets when directory already exists', async (t) => {
     ['fetch', 'reset', 'clean', 'rev-parse'],
   );
   assert.deepEqual(calls.find((c) => c.includes('clean')), ['git', '-C', dir, 'clean', '-fd']);
+  // fetch is the other network call; reset/clean/rev-parse stay on the default.
+  const fetchIndex = calls.findIndex((c) => c.includes('fetch'));
+  assert.ok(options[fetchIndex].timeoutMs >= 60_000, `fetch budget was ${options[fetchIndex].timeoutMs}`);
 });
 
 test('throws with git stderr on failure', async (t) => {

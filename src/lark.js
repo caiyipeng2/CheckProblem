@@ -54,6 +54,9 @@ export function createLark({ run, dryRun = false, log = null }) {
   // Free-form bodies must not travel in argv: on Windows the CLI is an npm
   // `.cmd` shim, so the runner needs `shell: true`, and long Chinese bodies can
   // also exceed the command-line limit. Bodies go through stdin instead.
+  //
+  // No explicit timeout: the runner bounds every call with its own default, so
+  // a hung lark-cli cannot leave the poll tick pending forever.
   const call = async (args, stdin) => {
     const opts = stdin === undefined ? {} : { stdin };
     const res = (await run('lark-cli', [...args, ...IDENTITY], opts)) ?? {};

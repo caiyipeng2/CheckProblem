@@ -430,6 +430,63 @@ test('a tick already in flight makes the next tick return immediately', async ()
   assert.equal(listCalls, 2);
 });
 
+test('a stalled poll warns once per overlap and the flag clears when it finishes', async () => {
+  const h = harness();
+  let release = () => {};
+  h.lark.listMessages = () =>
+    new Promise((resolve) => {
+      release = () => resolve([]);
+    });
+  const stalled = () => h.logs.warn.filter((line) => /poll still running after/.test(line));
+
+  const first = h.engine.tick();
+  h.setNow(NOW + 15_000);
+  await h.engine.tick();
+  h.setNow(NOW + 30_000);
+  await h.engine.tick();
+
+  assert.equal(stalled().length, 1, 'one line per overlap, not one per skipped tick');
+  assert.match(stalled()[0], /15000ms/, 'the line reports how long the tick has been stuck');
+
+  release();
+  await first;
+
+  // A later stall is a new overlap and must be reported again.
+  let releaseAgain = () => {};
+  h.lark.listMessages = () =>
+    new Promise((resolve) => {
+      releaseAgain = () => resolve([]);
+    });
+  const next = h.engine.tick();
+  h.setNow(NOW + 45_000);
+  await h.engine.tick();
+  assert.equal(stalled().length, 2, 'the already-warned flag is cleared when the tick finishes');
+  releaseAgain();
+  await next;
+});
+
+test('a skipped tick stays silent while an analysis is legitimately running', async () => {
+  const h = harness();
+  // Consume the crash-recovery pass so the seeded `running` job survives.
+  await h.engine.tick();
+  h.state.job = { ...awaitingJob(), status: 'running' };
+
+  let release = () => {};
+  h.lark.listMessages = () =>
+    new Promise((resolve) => {
+      release = () => resolve([]);
+    });
+
+  const first = h.engine.tick();
+  h.setNow(NOW + 15_000);
+  await h.engine.tick();
+  await h.engine.tick();
+
+  assert.equal(h.logs.warn.filter((line) => /poll still running after/.test(line)).length, 0);
+  release();
+  await first;
+});
+
 test('the footer falls back to the open_id when the lookup returns no name', async () => {
   const h = harness();
   const looked = [];

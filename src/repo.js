@@ -5,6 +5,10 @@
 
 import { existsSync } from 'node:fs';
 
+// clone and fetch move a multi-gigabyte Unity repo and can legitimately take
+// many minutes; everything else is local and relies on the runner's default.
+const NETWORK_TIMEOUT_MS = 1_800_000;
+
 function assertOk(res, what) {
   if (res.code !== 0) {
     throw new Error(`git ${what} failed: ${(res.stderr || res.stdout || '').slice(0, 300)}`);
@@ -23,10 +27,16 @@ export async function syncRepo({ dir, url, branch, run, log = null }) {
     // A plain directory here (e.g. an interrupted clone) takes this branch too;
     // git's "destination path already exists" is surfaced by assertOk.
     log?.info?.(`cloning ${url} -> ${dir}`);
-    assertOk(await run('git', ['clone', '--branch', branch, url, dir]), 'clone');
+    assertOk(
+      await run('git', ['clone', '--branch', branch, url, dir], { timeoutMs: NETWORK_TIMEOUT_MS }),
+      'clone',
+    );
   } else {
     log?.info?.(`syncing ${dir} to origin/${branch}`);
-    assertOk(await run('git', ['-C', dir, 'fetch', '--prune', 'origin']), 'fetch');
+    assertOk(
+      await run('git', ['-C', dir, 'fetch', '--prune', 'origin'], { timeoutMs: NETWORK_TIMEOUT_MS }),
+      'fetch',
+    );
     assertOk(await run('git', ['-C', dir, 'reset', '--hard', `origin/${branch}`]), 'reset');
     // -fd only: ignored build artifacts are irrelevant to analysis and costly to re-download.
     assertOk(await run('git', ['-C', dir, 'clean', '-fd']), 'clean');

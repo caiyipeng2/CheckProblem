@@ -15,7 +15,7 @@ import { runAnalysis } from '../src/analyze.js';
 import { createEngine } from '../src/index.js';
 import { run } from '../src/runner.js';
 import { collectEvidence } from '../src/search.js';
-import { askChat } from '../src/chat.js';
+import { askChat, resolveApiKey } from '../src/chat.js';
 import { acquireLock, releaseLock } from '../src/lock.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -70,7 +70,7 @@ const engine = createEngine({
           prompt,
           baseUrl: attempt.baseUrl,
           model: attempt.model,
-          apiKey: process.env[attempt.apiKeyEnv ?? 'DEEPSEEK_API_KEY'],
+          apiKey: resolveApiKey({ apiKeyEnv: attempt.apiKeyEnv, apiKeyFile: attempt.apiKeyFile }),
           timeoutMs: attempt.timeoutSec * 1000,
         }),
     }),

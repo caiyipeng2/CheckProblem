@@ -3,7 +3,30 @@
 // over the pre-search digest answers in seconds. Read-only by construction:
 // nothing here can touch the repo.
 
+import { readFileSync } from 'node:fs';
+
 const DEFAULT_TIMEOUT_MS = 120_000;
+const DEFAULT_KEY_ENV = 'DEEPSEEK_API_KEY';
+
+// The key comes from an environment variable or, if that is not set, from a
+// file the operator writes themselves — so a secret never has to be pasted
+// into a chat transcript or committed to config.
+export function resolveApiKey({
+  apiKeyEnv = DEFAULT_KEY_ENV,
+  apiKeyFile,
+  env = process.env,
+  readFile = (file) => readFileSync(file, 'utf8'),
+} = {}) {
+  const fromEnv = apiKeyEnv ? env[apiKeyEnv] : undefined;
+  if (typeof fromEnv === 'string' && fromEnv.trim() !== '') return fromEnv.trim();
+  if (!apiKeyFile) return undefined;
+  try {
+    const fromFile = readFile(apiKeyFile).trim();
+    return fromFile === '' ? undefined : fromFile;
+  } catch {
+    return undefined;
+  }
+}
 
 export async function askChat({
   prompt,

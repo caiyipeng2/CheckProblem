@@ -19,7 +19,8 @@
         "baseUrl": "https://api.deepseek.com",
         "model": "deepseek-chat",
         "apiKeyEnv": "DEEPSEEK_API_KEY",
-        "timeoutSec": 120
+        "timeoutSec": 120,
+        "apiKeyFile": "C:/Users/EDY/.checkproblem/deepseek.key"
       },
       {
         "label": "codex-fast",

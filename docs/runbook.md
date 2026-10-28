@@ -120,7 +120,7 @@ node bin/checkproblem.js --config D:\path\config.local.json
 ]
 ```
 
-每个引擎两项必填：`label` 和 `timeoutSec`。`kind` 缺省是 `codex`（走 `codex exec`，可用 `command` / `model` / `reasoningEffort` / `extraArgs` 调参）；`kind: "chat"` 走单轮 `POST {baseUrl}/chat/completions`，用 `baseUrl`、`model`、`apiKeyEnv`（环境变量名，默认 `DEEPSEEK_API_KEY`）。
+每个引擎两项必填：`label` 和 `timeoutSec`。`kind` 缺省是 `codex`（走 `codex exec`，可用 `command` / `model` / `reasoningEffort` / `extraArgs` 调参）；`kind: "chat"` 走单轮 `POST {baseUrl}/chat/completions`，用 `baseUrl`、`model`、以及凭据二选一：`apiKeyEnv`（环境变量名，默认 `DEEPSEEK_API_KEY`）或 `apiKeyFile`（一行纯文本的 key 文件路径，环境变量优先）。推荐用 key 文件：`mkdir -p ~/.checkproblem && echo sk-xxx > ~/.checkproblem/deepseek.key`，key 不会进仓库，也不会出现在日志里。
 
 **数据外发**：`kind: "chat"` 会把「问题 + 检索命中的代码片段」发到你配置的接口。配置的是公网服务时，等于把这段源码发出去——请确认可接受，或改指向公司内部网关。
 

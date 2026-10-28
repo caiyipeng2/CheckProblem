@@ -86,3 +86,23 @@ test('askChat reports a timeout instead of hanging', async () => {
     /超时（0 秒）/,
   );
 });
+test('resolveApiKey prefers the environment and falls back to a file', async () => {
+  const { resolveApiKey } = await import('../src/chat.js');
+  assert.equal(resolveApiKey({ apiKeyEnv: 'K', env: { K: ' from-env ' } }), 'from-env');
+  assert.equal(
+    resolveApiKey({ apiKeyEnv: 'K', apiKeyFile: 'f', env: {}, readFile: () => 'from-file\n' }),
+    'from-file',
+  );
+  assert.equal(resolveApiKey({ apiKeyEnv: 'K', env: {}, readFile: () => '  \n' }), undefined);
+  assert.equal(
+    resolveApiKey({
+      apiKeyEnv: 'K',
+      apiKeyFile: 'f',
+      env: {},
+      readFile: () => {
+        throw new Error('ENOENT');
+      },
+    }),
+    undefined,
+  );
+});

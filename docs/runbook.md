@@ -71,7 +71,7 @@ node bin/checkproblem.js --config D:\path\config.local.json
 | 子进程默认超时 | 120 秒 | 未单独指定预算的调用：lark-cli 读写、git reset/clean/rev-parse、通讯录查询 |
 | git clone / fetch | 1800 秒 | 网络操作，超时按失败处理 |
 | 本地预检索 | 60 秒 | 单遍 `git grep`，命中文件取前 8 个、摘要 ≤6000 字符；失败不影响分析 |
-| chat 引擎 | 120 秒 | `analyze.attempts[0]`（`deepseek`）；单轮请求，通常几秒到十几秒。未设置 `DEEPSEEK_API_KEY` 时直接跳过 |
+| chat 引擎 | 120 秒 | `analyze.attempts[0]`（`deepseek-flash`，公司网关）；单轮请求，实测约 8 秒。取不到 key 时直接跳过 |
 | codex 快档 | 240 秒 | `analyze.attempts[1]`（`codex-fast`，low 推理）；实测在本仓库上给不出答案，仅作兜底 |
 | codex 深档 | 600 秒 | `analyze.attempts[2]`（`codex-deep`）；前两个都失败才启动 |
 | 消息页大小 | 50 条 | 固定值，不翻页 |
@@ -114,13 +114,13 @@ node bin/checkproblem.js --config D:\path\config.local.json
 
 ```json
 [
-  { "label": "deepseek", "kind": "chat", "baseUrl": "https://api.deepseek.com", "model": "deepseek-chat", "apiKeyEnv": "DEEPSEEK_API_KEY", "timeoutSec": 120 },
+  { "label": "deepseek-flash", "kind": "chat", "baseUrl": "http://192.168.11.66:8080", "model": "deepseek-flash", "apiKeyFile": "C:/Users/EDY/.checkproblem/deepseek.key", "timeoutSec": 120 },
   { "label": "codex-fast", "command": "codex", "model": "gpt-5.6-luna", "reasoningEffort": "low", "timeoutSec": 240 },
   { "label": "codex-deep", "command": "codex", "timeoutSec": 600 }
 ]
 ```
 
-每个引擎两项必填：`label` 和 `timeoutSec`。`kind` 缺省是 `codex`（走 `codex exec`，可用 `command` / `model` / `reasoningEffort` / `extraArgs` 调参）；`kind: "chat"` 走单轮 `POST {baseUrl}/chat/completions`，用 `baseUrl`、`model`、以及凭据二选一：`apiKeyEnv`（环境变量名，默认 `DEEPSEEK_API_KEY`）或 `apiKeyFile`（一行纯文本的 key 文件路径，环境变量优先）。推荐用 key 文件：`mkdir -p ~/.checkproblem && echo sk-xxx > ~/.checkproblem/deepseek.key`，key 不会进仓库，也不会出现在日志里。
+每个引擎两项必填：`label` 和 `timeoutSec`。`kind` 缺省是 `codex`（走 `codex exec`，可用 `command` / `model` / `reasoningEffort` / `extraArgs` 调参）；`kind: "chat"` 走单轮 `POST {baseUrl}/chat/completions`，用 `baseUrl`、`model`、以及凭据二选一：`apiKeyEnv`（环境变量名，默认 `DEEPSEEK_API_KEY`）或 `apiKeyFile`（一行纯文本的 key 文件路径，环境变量优先）。推荐用 key 文件：`mkdir -p ~/.checkproblem` 后把 key 写进 `~/.checkproblem/deepseek.key`（一行；若写成 `key：xxx` 形式，前缀会被自动去掉）。key 不会进仓库，也不会出现在日志里。
 
 **数据外发**：`kind: "chat"` 会把「问题 + 检索命中的代码片段」发到你配置的接口。配置的是公网服务时，等于把这段源码发出去——请确认可接受，或改指向公司内部网关。
 

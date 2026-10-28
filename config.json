@@ -14,10 +14,10 @@
   "analyze": {
     "attempts": [
       {
-        "label": "deepseek",
+        "label": "deepseek-flash",
         "kind": "chat",
-        "baseUrl": "https://api.deepseek.com",
-        "model": "deepseek-chat",
+        "baseUrl": "http://192.168.11.66:8080",
+        "model": "deepseek-flash",
         "apiKeyEnv": "DEEPSEEK_API_KEY",
         "timeoutSec": 120,
         "apiKeyFile": "C:/Users/EDY/.checkproblem/deepseek.key"

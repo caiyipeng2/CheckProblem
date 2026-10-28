@@ -7,10 +7,13 @@ import { readFileSync } from 'node:fs';
 
 const DEFAULT_TIMEOUT_MS = 120_000;
 const DEFAULT_KEY_ENV = 'DEEPSEEK_API_KEY';
+const LINE_BREAK = /\r?\n/;
+const LABEL_PREFIX = /^key\s*[:：]\s*/i;
 
 // The key comes from an environment variable or, if that is not set, from a
-// file the operator writes themselves — so a secret never has to be pasted
-// into a chat transcript or committed to config.
+// file the operator writes themselves — so a secret never has to be pasted into
+// a chat transcript or committed to config. A hand-written file often carries a
+// label ("key：…"), so that prefix is stripped.
 export function resolveApiKey({
   apiKeyEnv = DEFAULT_KEY_ENV,
   apiKeyFile,
@@ -20,12 +23,19 @@ export function resolveApiKey({
   const fromEnv = apiKeyEnv ? env[apiKeyEnv] : undefined;
   if (typeof fromEnv === 'string' && fromEnv.trim() !== '') return fromEnv.trim();
   if (!apiKeyFile) return undefined;
+
+  let line;
   try {
-    const fromFile = readFile(apiKeyFile).trim();
-    return fromFile === '' ? undefined : fromFile;
+    line = String(readFile(apiKeyFile))
+      .split(LINE_BREAK)
+      .map((entry) => entry.trim())
+      .find((entry) => entry !== '');
   } catch {
     return undefined;
   }
+  if (!line) return undefined;
+  const stripped = line.replace(LABEL_PREFIX, '').trim();
+  return stripped === '' ? undefined : stripped;
 }
 
 export async function askChat({

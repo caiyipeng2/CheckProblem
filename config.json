@@ -7,8 +7,8 @@
   "contextMessages": 5,
   "maxReplyChars": 4000,
   "repo": {
-    "mode": "copy",
-    "dir": "D:/Project/Idle_Outpost",
+    "mode": "clone",
+    "dir": "repo/Idle_Outpost",
     "url": "https://codeup.aliyun.com/5f2b9f02df9df74e36afc9ad/Idle_Outpost.git",
     "branch": "master"
   },

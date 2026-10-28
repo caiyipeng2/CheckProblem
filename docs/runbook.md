@@ -10,7 +10,7 @@
 - `lark-cli auth status`：当前身份应为 `user`，且该账号是目标群成员、能读消息和发消息。服务所有飞书调用都固定 `--as user`；只有 app/bot 身份不够（app 也不在群里）。
 - `codex --version`：能打印版本即可。再确认 `codex exec` 在该 Windows 用户下可用（登录态、网络、模型配额）。
 - `git --version`：服务直接调用系统 `git` 做 fetch（`copy` 模式）或 clone / fetch / reset / clean（`clone` 模式）。
-- `repo.dir`：当前部署指向开发工作副本 `D:\Project\Idle_Outpost`（`repo.mode` = `copy`），每轮分析只做 `git fetch`，**不 reset、不 clean、不切分支**，未提交改动会原样参与分析并在落款里标出数量。`clone` 模式下则要求目录是服务专用副本：不存在时会从 `repo.url` clone（约 4 GB，30 分钟预算）。
+- `repo.dir`：当前部署是服务专用副本 `repo/Idle_Outpost`（`repo.mode` = `clone`），每轮分析前 `fetch` → `reset --hard origin/master` → `clean -fd`，**一律基于最新远端代码**；本地改动不会被保留。目录不存在时会从 `repo.url` clone（约 4 GB，30 分钟预算）。若要让服务改读某个工作副本，把 `repo.mode` 改成 `copy`（只 fetch，不动工作区）。
 - `config.json`：`chatId`、`selfOpenId` 必填；首次 clone 还需要 `repo.url`；`repo.dir` 必须可写。缺 `chatId` / `selfOpenId` 时进程加载配置就会报错，不会启动。
 - 首次启动（还没有状态文件时）只处理启动之后的新消息：游标在启动时播种为当前时间，启动前的群历史不会被分析。
 
@@ -106,8 +106,8 @@ node bin/checkproblem.js --config D:\path\config.local.json
 | `pollIntervalSec` | `15` | 轮询间隔，秒 |
 | `contextMessages` | `5` | 随问题一起交给 codex 的前置消息条数（同一页内，每条截 200 字） |
 | `maxReplyChars` | `4000` | 回复总长上限（含落款）；超出时截断正文，完整版存 `logs/jobs/` |
-| `repo.mode` | `"clone"`；当前部署为 `"copy"` | `copy` = 只 fetch 并读工作副本；`clone` = 服务专用副本，会被 reset --hard / clean -fd |
-| `repo.dir` | 无默认；当前为 `D:/Project/Idle_Outpost` | 被分析的目录；相对路径按配置文件目录解析 |
+| `repo.mode` | `"clone"` | `clone` = 服务专用副本，每轮 reset --hard / clean -fd 到最新远端；`copy` = 只 fetch 并读工作副本，不动工作区 |
+| `repo.dir` | 无默认；当前为 `repo/Idle_Outpost` | 被分析的目录；相对路径按配置文件目录解析 |
 | `repo.url` | 无默认 | 仓库地址，`clone` 模式首次使用 |
 | `repo.branch` | `"master"` | `clone` 模式的同步分支；`copy` 模式取工作副本当前分支 |
 | `analyze.attempts` | 见下 | 按顺序尝试的分析引擎，每个有自己的预算 |
@@ -141,15 +141,15 @@ node bin/checkproblem.js --config D:\path\config.local.json
 
 两种模式的行为差别必须分清：
 
-- `copy`（当前部署）：只执行 `git -C <dir> fetch --prune origin`，随后 `rev-parse` 与 `status --porcelain` 只读查询。**不 reset、不 clean、不 checkout、不切换分支**，工作副本里的未提交改动不会被碰到，并且会参与分析、在落款里记为 `+<数量>`。fetch 失败只记一条 warn，分析照常进行（读的是磁盘上的文件）。
-- `clone`：服务专用的副本，每轮 `fetch` → `reset --hard origin/<branch>` → `clean -fd`。`reset --hard` 会丢弃该副本上的本地提交与未提交修改，`clean -fd` 会删除未跟踪文件（不加 `-x`，被忽略的构建产物保留）。**绝不能把 `clone` 模式的 `repo.dir` 指向开发工作副本。**
+- `copy`（备用模式）：只执行 `git -C <dir> fetch --prune origin`，随后 `rev-parse` 与 `status --porcelain` 只读查询。**不 reset、不 clean、不 checkout、不切换分支**，工作副本里的未提交改动不会被碰到，并且会参与分析、在落款里记为 `+<数量>`。fetch 失败只记一条 warn，分析照常进行（读的是磁盘上的文件）。
+- `clone`（当前部署）：服务专用的副本，每轮 `fetch` → `reset --hard origin/<branch>` → `clean -fd`。`reset --hard` 会丢弃该副本上的本地提交与未提交修改，`clean -fd` 会删除未跟踪文件（不加 `-x`，被忽略的构建产物保留）。**绝不能把 `clone` 模式的 `repo.dir` 指向开发工作副本。**
 
 通用约束：
 
 - 服务从不 push，也不会碰 `repo.dir` 之外的项目目录（运行时另写 `logs/` 和 `state/`）。
 - 分析引擎本身不写仓库：`codex` 以 `-s read-only` 运行，`kind: chat` 的引擎只收到检索出的代码片段文本。
 - `repo.dir` 必须是一个 git 仓库；不是时启动后第一次分析会报 `not a git repository: …`。
-- 想让服务看最新主干而不是你的工作副本，把 `repo.mode` 改回 `clone` 并指向 `repo/Idle_Outpost`。
+- 想让服务改看某个工作副本（含未提交改动），把 `repo.mode` 改成 `copy` 并把 `repo.dir` 指向它；那样落款会带 `+<未提交数>`。
 
 ## 开机自启
 

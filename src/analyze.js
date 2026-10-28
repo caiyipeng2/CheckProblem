@@ -93,7 +93,10 @@ function codexArgs({ repoDir, model, reasoningEffort, extraArgs = [] }) {
     'never',
     '--ephemeral',
     ...(model ? ['-m', model] : []),
-    ...(reasoningEffort ? ['-c', `model_reasoning_effort="${reasoningEffort}"`] : []),
+    // No quotes: the value is passed to the CLI through cmd.exe, where an
+    // embedded quote cannot be escaped. Codex falls back to the raw string when
+    // the value is not valid TOML, which is exactly what a bare word is.
+    ...(reasoningEffort ? ['-c', `model_reasoning_effort=${reasoningEffort}`] : []),
     ...extraArgs,
     // The trailing '-' tells the CLI to read the prompt from stdin; the banner,
     // tool calls and token report go to stderr, so stdout is the final answer.

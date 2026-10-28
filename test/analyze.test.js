@@ -227,7 +227,7 @@ test('runAnalysis falls back to the next engine when the first one times out', a
   assert.deepEqual(seen[1].opts, { stdin: 'p', timeoutMs: 420_000 });
   assert.deepEqual(seen[0].args.slice(0, 7), ['exec', '-C', 'C:/repo', '-s', 'read-only', '--color', 'never']);
   assert.ok(seen[0].args.includes('--ephemeral'));
-  assert.deepEqual(seen[0].args.slice(-5), ['-m', 'gpt-5.6-luna', '-c', 'model_reasoning_effort="low"', '-']);
+  assert.deepEqual(seen[0].args.slice(-5), ['-m', 'gpt-5.6-luna', '-c', 'model_reasoning_effort=low', '-']);
   assert.deepEqual(seen[1].args.slice(-3), ['-m', 'deepseek-chat', '-']);
   assert.equal(seen.every((c) => c.args.at(-1) === '-'), true, 'every attempt reads the prompt from stdin');
 });
@@ -258,4 +258,29 @@ test('runAnalysis reports every engine it tried when all of them fail', async ()
     },
   );
   assert.equal(n, 2, 'the second engine is still tried after the first fails');
+});
+
+test('every argument an attempt produces survives the real runner quoting', async () => {
+  // The unit tests above stub `run`, so this is the only place that proves the
+  // argv analyze.js builds can actually pass through the Windows shell runner.
+  const { quoteArg } = await import('../src/runner.js');
+  let argv;
+  const run = async (cmd, args) => {
+    argv = args;
+    return { code: 0, stdout: 'ok', stderr: '' };
+  };
+
+  await runAnalysis({
+    prompt: 'p',
+    repoDir: 'C:/repo',
+    run,
+    attempts: [
+      { label: 'a', command: 'codex', model: 'gpt-5.6-luna', reasoningEffort: 'low', timeoutSec: 1 },
+      { label: 'b', command: 'codex', model: 'deepseek-chat', reasoningEffort: 'medium', timeoutSec: 1 },
+    ],
+  });
+
+  assert.doesNotThrow(() => argv.map(quoteArg));
+  assert.equal(argv.some((arg) => arg.includes('"')), false, 'no argument may carry a quote character');
+  assert.equal(argv.every((arg) => !/\s/.test(arg)), true, 'no argument may carry whitespace');
 });

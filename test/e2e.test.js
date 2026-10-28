@@ -110,7 +110,7 @@ test('trigger -> prompt -> confirm -> analysis reply (dry run)', async () => {
   assert.equal(h.state.lastSeen.messageId, 'om_2');
 });
 
-test('second trigger while awaiting is ignored (no duplicate prompt)', async () => {
+test('second trigger while awaiting gets a busy notice instead of a second prompt', async () => {
   const h = setup();
   h.setBatch([msg('om_1', 100, '蔡龙 问题一')]);
   await h.engine.tick();
@@ -120,7 +120,9 @@ test('second trigger while awaiting is ignored (no duplicate prompt)', async () 
   h.setBatch([msg('om_1', 100, '蔡龙 问题一'), msg('om_2', 150, '蔡龙 问题二')]);
   await h.engine.tick();
 
-  assert.equal(h.sent.length, 1, 'no second confirmation prompt');
+  assert.equal(h.sent.length, 2, 'the dropped question is told why');
+  assert.equal(h.sent[1].id, 'om_2');
+  assert.match(h.sent[1].text, /已有查询待确认/);
   assert.equal(h.prompts.length, 0, 'no analysis starts before a confirm');
   assert.equal(h.state.job.triggerMessageId, 'om_1');
   assert.equal(h.state.lastSeen.messageId, 'om_2');

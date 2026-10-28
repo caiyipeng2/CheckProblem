@@ -13,7 +13,7 @@ import { join } from 'node:path';
 import { extractPlainText, hasTrigger, classifyConfirmation, isUnseen } from './trigger.js';
 import { markSeen } from './state.js';
 import { buildPrompt } from './analyze.js';
-import { CONFIRM_PROMPT, TIMEOUT_NOTICE, CANCELLED_NOTICE, clipForReply } from './reply.js';
+import { CONFIRM_PROMPT, TIMEOUT_NOTICE, CANCELLED_NOTICE, BUSY_NOTICE, clipForReply } from './reply.js';
 
 // Enough for a busy chat plus the context window. The brief's
 // max(20, contextMessages + 5) was replaced by a fixed page: context never
@@ -158,6 +158,7 @@ export function createEngine({ config, lark, syncRepo, runAnalysis, state, clock
       const unseen = batch.filter((m) => isUnseen(state.lastSeen, m));
 
       if (state.job?.status === 'awaiting') {
+        let busyNotified = false;
         for (const message of unseen) {
           const kind = classifyConfirmation(extractPlainText(message).trim());
           if (kind === 'confirm') {
@@ -176,8 +177,17 @@ export function createEngine({ config, lark, syncRepo, runAnalysis, state, clock
             await notice(triggerMessageId, CANCELLED_NOTICE);
             return;
           }
-          // Anything else is chatter; keep scanning so a 确认 later in the same
-          // batch is still honoured.
+          // A second question must not vanish silently while one is pending, but
+          // one notice per tick is enough; ordinary chatter stays ignored.
+          if (
+            !busyNotified &&
+            senderId(message) !== config.selfOpenId &&
+            hasTrigger(message, config.triggerKeyword)
+          ) {
+            busyNotified = true;
+            await notice(message.message_id, BUSY_NOTICE);
+          }
+          // Keep scanning so a 确认 later in the same batch is still honoured.
         }
 
         // Never start a second job while one is awaiting, but still advance the

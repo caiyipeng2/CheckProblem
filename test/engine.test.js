@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createEngine } from '../src/index.js';
 import { initialState } from '../src/state.js';
-import { CONFIRM_PROMPT, TIMEOUT_NOTICE, CANCELLED_NOTICE } from '../src/reply.js';
+import { CONFIRM_PROMPT, TIMEOUT_NOTICE, CANCELLED_NOTICE, BUSY_NOTICE } from '../src/reply.js';
 
 // Feishu create_time is a 13-digit millisecond timestamp string.
 const NOW = 1793162767785;
@@ -302,14 +302,15 @@ test('chatter while awaiting is ignored but a later confirm in the same batch ru
 
   await h.engine.tick();
 
-  assert.equal(h.replies.length, 1, 'chatter must not draw a reply, and no second prompt');
-  assert.equal(h.replies[0].id, 'om_1');
-  assert.match(h.replies[0].text, /master@abc1234/);
+  assert.equal(h.replies.length, 2, 'the dropped question gets one notice, the confirm gets the result');
+  assert.deepEqual(h.replies[0], { id: 'om_3', text: BUSY_NOTICE }, 'plain chatter draws nothing');
+  assert.equal(h.replies[1].id, 'om_1');
+  assert.match(h.replies[1].text, /master@abc1234/);
   assert.equal(h.calls.prompts.length, 1);
   assert.equal(h.state.job, null);
 });
 
-test('a second trigger while awaiting neither prompts again nor replaces the job', async () => {
+test('a second trigger while awaiting gets the busy notice and does not replace the job', async () => {
   const h = harness();
   h.state.job = awaitingJob({ promptMessageId: 'om_p1' });
   h.state.lastSeen = { createTimeMs: NOW, messageId: 'om_1' };
@@ -320,7 +321,9 @@ test('a second trigger while awaiting neither prompts again nor replaces the job
 
   await h.engine.tick();
 
-  assert.equal(h.replies.length, 0);
+  assert.equal(h.replies.length, 1, 'one notice for the dropped question, nothing for chatter');
+  assert.equal(h.replies[0].id, 'om_2');
+  assert.equal(h.replies[0].text, BUSY_NOTICE);
   assert.equal(h.state.job.status, 'awaiting');
   assert.equal(h.state.job.triggerMessageId, 'om_1');
   assert.equal(h.state.job.promptMessageId, 'om_p1');

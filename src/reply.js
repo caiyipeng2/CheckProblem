@@ -7,13 +7,15 @@ export const CANCELLED_NOTICE = '查询已取消。';
 export const BUSY_NOTICE = '已有查询待确认，请先确认或取消。';
 
 // Single source of the provenance footer, so formatResult and clipForReply
-// cannot drift apart on its wording.
-function footer(commit, confirmer) {
-  return `—— 蔡龙自动分析 · master@${commit} · 由 ${confirmer} 确认`;
+// cannot drift apart on its wording. `provenance` is what was analysed, e.g.
+// `feature/Medal-Challenge@b7540c6+22` (22 uncommitted files) or `master@a1b2c3d`
+// for a clean clone; it comes from the repo layer, so the footer never guesses.
+function footer(provenance, confirmer) {
+  return `—— 蔡龙自动分析 · ${provenance} · 由 ${confirmer} 确认`;
 }
 
-export function formatResult({ analysis, commit, confirmer }) {
-  return `${String(analysis ?? '').trim()}\n\n${footer(commit, confirmer)}`;
+export function formatResult({ analysis, provenance, confirmer }) {
+  return `${String(analysis ?? '').trim()}\n\n${footer(provenance, confirmer)}`;
 }
 
 export function truncate(text, max) {
@@ -26,10 +28,10 @@ export function truncate(text, max) {
 // footer and may exceed maxChars rather than lose attribution. The blank line
 // before the footer is part of the budget, so a clipped reply never runs the
 // last sentence straight into the em dashes.
-export function clipForReply({ analysis, commit, confirmer, maxChars }) {
-  const full = formatResult({ analysis, commit, confirmer });
+export function clipForReply({ analysis, provenance, confirmer, maxChars }) {
+  const full = formatResult({ analysis, provenance, confirmer });
   if (full.length <= maxChars) return { text: full, truncated: false, full };
-  const foot = footer(commit, confirmer);
+  const foot = footer(provenance, confirmer);
   const budget = maxChars - foot.length - 2;
   const body = budget > 0 ? String(analysis ?? '').trim().slice(0, budget) : '';
   return { text: body ? `${body}\n\n${foot}` : foot, truncated: true, full };

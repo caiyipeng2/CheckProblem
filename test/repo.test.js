@@ -136,3 +136,58 @@ test('rejects an undefined or empty dir without running git', async () => {
     assert.deepEqual(calls, []);
   }
 });
+
+test('copy mode only fetches and reports the working copy as it is', async () => {
+  const calls = [];
+  const replies = {
+    fetch: { code: 0, stdout: '', stderr: '' },
+    branch: { code: 0, stdout: 'feature/Medal-Challenge\n', stderr: '' },
+    rev: { code: 0, stdout: 'b7540c6ff3\n', stderr: '' },
+    status: { code: 0, stdout: ' M Assets/A.cs\n?? Assets/B.cs\n', stderr: '' },
+  };
+  const run = async (cmd, args, opts) => {
+    calls.push({ args, opts });
+    if (args.includes('fetch')) return replies.fetch;
+    if (args.includes('--abbrev-ref')) return replies.branch;
+    if (args.includes('rev-parse')) return replies.rev;
+    if (args.includes('status')) return replies.status;
+    throw new Error(`unexpected git call: ${args.join(' ')}`);
+  };
+
+  const dir = mkdtempSync(join(tmpdir(), 'repo-copy-'));
+  mkdirSync(join(dir, '.git'), { recursive: true });
+
+  const res = await syncRepo({ dir, mode: 'copy', run, log: { info() {}, warn() {} } });
+
+  assert.equal(res.branch, 'feature/Medal-Challenge');
+  assert.equal(res.commit, 'b7540c6ff3');
+  assert.equal(res.dirty, 2);
+  assert.equal(res.provenance, 'feature/Medal-Challenge@b7540c6ff3+2');
+  const commands = calls.map((c) => c.args.join(' '));
+  assert.equal(commands.some((c) => /reset|clean|checkout|switch/.test(c)), false, 'copy mode must not mutate the working copy');
+  assert.equal(commands.filter((c) => c.includes('fetch')).length, 1);
+});
+
+test('copy mode still answers when the fetch fails', async () => {
+  const warnings = [];
+  const run = async (cmd, args) => {
+    if (args.includes('fetch')) return { code: 128, stdout: '', stderr: 'fatal: unable to access remote' };
+    if (args.includes('--abbrev-ref')) return { code: 0, stdout: 'develop\n', stderr: '' };
+    if (args.includes('rev-parse')) return { code: 0, stdout: '3c261ca\n', stderr: '' };
+    if (args.includes('status')) return { code: 0, stdout: '', stderr: '' };
+    throw new Error('unexpected');
+  };
+  const dir = mkdtempSync(join(tmpdir(), 'repo-copy-'));
+  mkdirSync(join(dir, '.git'), { recursive: true });
+
+  const res = await syncRepo({ dir, mode: 'copy', run, log: { info() {}, warn: (m) => warnings.push(m) } });
+  assert.equal(res.provenance, 'develop@3c261ca', 'a clean working copy has no +N suffix');
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0], /fetch failed/);
+});
+
+test('copy mode refuses a directory that is not a git repository', async () => {
+  const run = async () => ({ code: 0, stdout: '', stderr: '' });
+  const dir = mkdtempSync(join(tmpdir(), 'repo-copy-'));
+  await assert.rejects(() => syncRepo({ dir, mode: 'copy', run }), /not a git repository/);
+});

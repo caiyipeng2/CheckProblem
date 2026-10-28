@@ -52,7 +52,7 @@ function setup() {
     log: { info() {}, warn() {}, error() {} },
     // The real module writes state/; the e2e run must stay off disk.
     saveState: (s) => saves.push(JSON.parse(JSON.stringify(s))),
-    syncRepo: async () => ({ commit: 'abc1234' }),
+    syncRepo: async () => ({ commit: 'abc1234', provenance: 'master@abc1234' }),
     runAnalysis: async (prompt) => {
       prompts.push(prompt);
       return { text: ANALYSIS };

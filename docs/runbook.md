@@ -1,6 +1,6 @@
 # CheckProblem 运行手册
 
-本手册写给需要让服务持续运行的人。服务以登录用户本人的飞书身份（`lark-cli api … --as user`）默认每 15 秒轮询一个群：消息正文含「蔡龙」或被 @蔡龙 时，服务回复该消息请群成员确认；任意成员在确认窗口（默认 10 分钟）内回复「确认」后，服务同步 `repo/Idle_Outpost` 并运行 `codex exec -s read-only`，把四段式诊断回复到原消息；回复「取消」则放弃。落款固定为 `—— 蔡龙自动分析 · master@<sha> · 由 <确认人> 确认`。同一时间只处理一个任务。
+本手册写给需要让服务持续运行的人。服务以登录用户本人的飞书身份（`lark-cli api … --as user`）默认每 15 秒轮询一个群：消息正文含「蔡龙」或被 @蔡龙 时，服务回复该消息请群成员确认；任意成员在确认窗口（默认 10 分钟）内回复「确认」后，服务对 `repo.dir` 做一次 `git fetch`、按问题关键词本地检索、再交给模型分析，把四段式诊断回复到原消息；回复「取消」则放弃。落款为 `—— 蔡龙自动分析 · <分支>@<sha>[+未提交数] · 由 <确认人> 确认`，例如 `feature/Medal-Challenge@b7540c6+22`。同一时间只处理一个任务。
 
 ## 前置检查
 
@@ -9,8 +9,8 @@
 - `node -v`：输出应为 `v22` 或更高。服务是 ESM、无 npm 第三方依赖，但 `package.json` 要求 Node >= 22。
 - `lark-cli auth status`：当前身份应为 `user`，且该账号是目标群成员、能读消息和发消息。服务所有飞书调用都固定 `--as user`；只有 app/bot 身份不够（app 也不在群里）。
 - `codex --version`：能打印版本即可。再确认 `codex exec` 在该 Windows 用户下可用（登录态、网络、模型配额）。
-- `git --version`：服务直接调用系统 `git` 做 clone / fetch / reset / clean。
-- `repo/Idle_Outpost`：存在时，每次分析前只做 fetch / reset / clean；不存在时，会在第一次分析时从 `repo.url` clone。clone 约 4 GB，预算 30 分钟，需留足磁盘空间并保证能访问仓库。
+- `git --version`：服务直接调用系统 `git` 做 fetch（`copy` 模式）或 clone / fetch / reset / clean（`clone` 模式）。
+- `repo.dir`：当前部署指向开发工作副本 `D:\Project\Idle_Outpost`（`repo.mode` = `copy`），每轮分析只做 `git fetch`，**不 reset、不 clean、不切分支**，未提交改动会原样参与分析并在落款里标出数量。`clone` 模式下则要求目录是服务专用副本：不存在时会从 `repo.url` clone（约 4 GB，30 分钟预算）。
 - `config.json`：`chatId`、`selfOpenId` 必填；首次 clone 还需要 `repo.url`；`repo.dir` 必须可写。缺 `chatId` / `selfOpenId` 时进程加载配置就会报错，不会启动。
 - 首次启动（还没有状态文件时）只处理启动之后的新消息：游标在启动时播种为当前时间，启动前的群历史不会被分析。
 
@@ -86,7 +86,8 @@ node bin/checkproblem.js --config D:\path\config.local.json
 | 进程退出，退出码 1；日志出现 `missing scopes: … — run lark-cli auth login --scope "<scope>"` | 用户身份缺少某个 API scope（首次部署、换租户、授权被撤销）。缺 scope 无法靠重试恢复，服务会主动退出而不是空转 | 按日志列出的 scope 逐个补授权：`lark-cli auth login --scope "<scope>"`，然后重启服务 |
 | 日志持续出现 `tick failed (N in a row): …`，错误信息为 token 无效/过期、鉴权失败一类 | 用户 access token 过期或被撤销。服务不会自己重新登录，只会每轮记一条失败；连续 5 次会额外打一行告警 | 重新执行 `lark-cli auth login`（必要时带上原有 scope），观察下一轮日志；仍失败再重启服务 |
 | 群里有新消息但服务毫无反应，日志只有启动行或没有新事件 | `config.json` 的 `chatId` 不是目标群；`triggerKeyword` 与消息里的写法不一致；或游标已经越过这条消息（服务停机期间收到的、且仍在新一页里的消息会在重启后被处理；超出最新 50 条的旧消息则看不到） | 核对 `chatId` 和 `triggerKeyword`；把消息时间与 `state/state.json` 的 `lastSeen.createTimeMs` 对比；停服删除 `state/state.json` 后重启（游标重置为启动时刻），再发一条含触发词的新消息 |
-| 群回复 `分析失败：git clone failed: …` 或 `分析失败：git fetch failed: …` | 访问仓库失败、磁盘不足、git 凭据失效，或 `repo/Idle_Outpost` 是上次中断留下的半成品目录 | clone/fetch 预算 30 分钟，仓库约 4 GB：检查网络、磁盘空间、`repo.url` 和 git 凭据。若目录存在但不是有效 clone（没有 `.git` 或内容不全），停服后删除整个 `repo/Idle_Outpost` 让服务重新 clone |
+| 群回复 `分析失败：not a git repository: …` | `repo.dir` 指错了，或该目录还初始化 git | 核对 `config.json` 的 `repo.dir`；`copy` 模式只接受已存在的 git 工作副本 |
+| 群回复 `分析失败：git fetch failed: …`（`clone` 模式） | 访问仓库失败、磁盘不足或凭据失效 | 检查网络、磁盘、`repo.url` 与 git 凭据；仓库约 4 GB，预算 30 分钟 |
 | 群回复 `分析失败：所有分析引擎都失败：codex-fast: 超时（240 秒）；codex-deep: …` | 所有引擎都没能在各自预算内给出答案 | 原任务已结束，重新发起即可。频繁失败可调大 `analyze.attempts` 里的 `timeoutSec`，或换更快的模型；同时检查 codex 登录态、网络与模型配额。分析是只读的，重跑没有副作用 |
 | 日志出现 `search failed: …`，但分析照常返回 | 本地 `git grep` 失败（仓库损坏、路径不对等） | 不必处理：模型会在没有线索的情况下自行检索，只是更慢、定位精度更低。反复出现且分析变慢时再查 |
 | 群回复其它 `分析失败：…` | git reset/clean 失败、codex 非零退出或空输出、回复消息失败等 | 按日志中 `analysis failed for <message_id>: …` 的完整错误处理；修好后重新发触发消息（原触发消息已标记为已读，不会自动重来） |
@@ -105,9 +106,10 @@ node bin/checkproblem.js --config D:\path\config.local.json
 | `pollIntervalSec` | `15` | 轮询间隔，秒 |
 | `contextMessages` | `5` | 随问题一起交给 codex 的前置消息条数（同一页内，每条截 200 字） |
 | `maxReplyChars` | `4000` | 回复总长上限（含落款）；超出时截断正文，完整版存 `logs/jobs/` |
-| `repo.url` | 无默认 | Idle_Outpost 的 git 地址，首次 clone 使用 |
-| `repo.dir` | 无默认；当前为 `repo/Idle_Outpost` | 专用 clone 目录；相对路径按配置文件目录解析 |
-| `repo.branch` | `"master"` | 同步分支 |
+| `repo.mode` | `"clone"`；当前部署为 `"copy"` | `copy` = 只 fetch 并读工作副本；`clone` = 服务专用副本，会被 reset --hard / clean -fd |
+| `repo.dir` | 无默认；当前为 `D:/Project/Idle_Outpost` | 被分析的目录；相对路径按配置文件目录解析 |
+| `repo.url` | 无默认 | 仓库地址，`clone` 模式首次使用 |
+| `repo.branch` | `"master"` | `clone` 模式的同步分支；`copy` 模式取工作副本当前分支 |
 | `analyze.attempts` | 见下 | 按顺序尝试的分析引擎，每个有自己的预算 |
 
 `analyze.attempts` 的默认值：
@@ -129,7 +131,7 @@ node bin/checkproblem.js --config D:\path\config.local.json
 
 几点注意：
 
-- 确认提示里的「10 分钟内」和落款里的 `master` 是固定文案：改 `confirmTimeoutSec` 只改实际超时窗口，提示语仍写 10 分钟；改 `repo.branch` 只改同步分支，落款仍写 master。
+- 确认提示里的「10 分钟内」是固定文案：改 `confirmTimeoutSec` 只改实际超时窗口，提示语仍写 10 分钟。落款中的分支与提交来自实际分析的对象，不需要也不应该手改。
 - 触发词按子串匹配；@ 触发的依据是消息 `mentions` 里的显示名，正文此时是 `@_user_xxx` 占位符。
 - 更换 `chatId` 前先停服并处理 `state/state.json`（删除，或手工把 `job` 置为 `null`），避免旧群的待确认任务跟到新群。
 - `chatId` 或 `selfOpenId` 缺失/为空时，加载配置直接报错（如 `config: chatId is required`），进程不会启动。
@@ -137,13 +139,17 @@ node bin/checkproblem.js --config D:\path\config.local.json
 
 ## 仓库安全
 
-服务只写 `repo.dir` 指向的目录，而且只通过 git：首次 `git clone --branch <branch> <url> <dir>`；之后 `git -C <dir> fetch --prune origin`、`git reset --hard origin/<branch>`、`git clean -fd`，最后 `rev-parse --short HEAD`。不会 push，也不会碰其他仓库路径（运行时另写 `logs/` 和 `state/`）。
+两种模式的行为差别必须分清：
 
-- `reset --hard` 会丢弃该副本上的本地提交和所有未提交修改；`clean -fd` 会删除未跟踪的文件和目录（不加 `-x`，被忽略的构建产物会保留）。
-- 因此绝不要把 `repo.dir` 指向任何有未提交工作的、或与别人共用的工作副本。它必须是服务专用的 clone；平时开发请另开目录。
-- codex 以 `-s read-only` 运行，只检索代码，不会修改 clone。这是第二道保险，第一道是上面的专用副本。
-- 目标目录存在、非空、但不是有效 git 仓库时，clone 会因「目标路径已存在且非空」失败；先删掉该目录再重试（空目录可以直接 clone）。
-- 首次 clone 约 4 GB、预算 30 分钟；网络慢导致失败时，清理半成品目录后重试即可。
+- `copy`（当前部署）：只执行 `git -C <dir> fetch --prune origin`，随后 `rev-parse` 与 `status --porcelain` 只读查询。**不 reset、不 clean、不 checkout、不切换分支**，工作副本里的未提交改动不会被碰到，并且会参与分析、在落款里记为 `+<数量>`。fetch 失败只记一条 warn，分析照常进行（读的是磁盘上的文件）。
+- `clone`：服务专用的副本，每轮 `fetch` → `reset --hard origin/<branch>` → `clean -fd`。`reset --hard` 会丢弃该副本上的本地提交与未提交修改，`clean -fd` 会删除未跟踪文件（不加 `-x`，被忽略的构建产物保留）。**绝不能把 `clone` 模式的 `repo.dir` 指向开发工作副本。**
+
+通用约束：
+
+- 服务从不 push，也不会碰 `repo.dir` 之外的项目目录（运行时另写 `logs/` 和 `state/`）。
+- 分析引擎本身不写仓库：`codex` 以 `-s read-only` 运行，`kind: chat` 的引擎只收到检索出的代码片段文本。
+- `repo.dir` 必须是一个 git 仓库；不是时启动后第一次分析会报 `not a git repository: …`。
+- 想让服务看最新主干而不是你的工作副本，把 `repo.mode` 改回 `clone` 并指向 `repo/Idle_Outpost`。
 
 ## 开机自启
 
@@ -182,5 +188,5 @@ schtasks /Delete /TN "CheckProblem" /F
 - 同一时间只处理一个任务：等待确认期间，新的「蔡龙」提问会收到「已有查询待确认，请先确认或取消。」的提示，不会排队；分析进行中到达的提问会在本轮结束后由下一次轮询处理（同理只处理最新一页）。
 - 两次轮询之间如果冒出超过约 50 条消息，触发消息可能已经不在最新一页（固定 50 条、不翻页）；游标会推进到已读到的最新消息，这条提问就被漏掉。轮询是串行的：一次分析期间（最长为主引擎 + 备用引擎的预算之和）完全不轮询，所以真正的「漏消息窗口」是这次分析加上前后各一个轮询间隔，而不是 15 秒。
 - 预检索靠问句里的 ASCII 标识符（如 `reward_1001`）和中文二元组。中文没有分词，问题描述越笼统（「奖励没到」），线索越散；把出问题的接口名、配置键、报错文本写进提问，命中率会明显提高。
-- 分析是只读的：codex 在 `-s read-only` 沙箱里运行，只检索代码，不会修改 clone；真正的写操作只有 git 同步。
+- 分析是只读的：`copy` 模式只 fetch，`clone` 模式只有 git 同步会写仓库；模型本身拿不到写权限。
 - 游标跨重启保留：服务停机期间群里的消息不会丢，重启后凡是仍在最新 50 条内的，会照常触发（可能补发一次确认提示）。要避免这种补发，停服删除 `state/state.json`，重启后只处理启动之后的消息。

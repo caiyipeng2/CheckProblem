@@ -82,7 +82,7 @@ function harness(overrides = {}) {
     saveState: (s) => saves.push(JSON.parse(JSON.stringify(s))),
     syncRepo: async () => {
       calls.sync += 1;
-      return { commit: 'abc1234' };
+      return { commit: 'abc1234', provenance: 'master@abc1234' };
     },
     runAnalysis: async (prompt) => {
       calls.prompts.push(prompt);

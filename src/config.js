@@ -25,7 +25,7 @@ export function loadConfig(filePath) {
   if (!raw.chatId) throw new Error('config: chatId is required');
   if (!raw.selfOpenId) throw new Error('config: selfOpenId is required');
 
-  const repo = { branch: 'master', ...(raw.repo ?? {}) };
+  const repo = { mode: 'clone', branch: 'master', ...(raw.repo ?? {}) };
   if (repo.dir && !isAbsolute(repo.dir)) repo.dir = join(root, repo.dir);
 
   return {

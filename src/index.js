@@ -81,7 +81,7 @@ export function createEngine({ config, lark, syncRepo, runAnalysis, state, clock
     log?.info?.(`confirmed by ${confirmer}, question=${job.question}`);
 
     try {
-      const { commit } = await syncRepo();
+      const { provenance } = await syncRepo();
       // The clone moved, so the search runs after the sync. A failed search only
       // costs precision: the model still gets the question.
       let evidence = '';
@@ -99,7 +99,7 @@ export function createEngine({ config, lark, syncRepo, runAnalysis, state, clock
       const { text } = await runAnalysis(prompt);
       const { text: body, truncated, full } = clipForReply({
         analysis: text,
-        commit,
+        provenance,
         confirmer,
         maxChars: config.maxReplyChars,
       });
@@ -116,7 +116,7 @@ export function createEngine({ config, lark, syncRepo, runAnalysis, state, clock
           log?.error?.(`cannot archive full analysis: ${err?.message ?? err}`);
         }
       }
-      log?.info?.(`analysis for ${triggerMessageId} delivered at ${commit}`);
+      log?.info?.(`analysis for ${triggerMessageId} delivered at ${provenance}`);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       log?.error?.(`analysis failed for ${triggerMessageId}: ${message}`);

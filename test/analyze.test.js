@@ -365,3 +365,65 @@ test('a chat attempt without a configured client is skipped, not fatal', async (
   });
   assert.equal(res.engine, 'codex');
 });
+
+test('looksLikeToolCall spots the junk a small model sometimes emits', async () => {
+  const { looksLikeToolCall } = await import('../src/analyze.js');
+  assert.equal(
+    looksLikeToolCall('<|DSML| calls>\n<|DSML| invoke name="bash">\n<|DSML| parameter name="command">cd /'),
+    true,
+  );
+  assert.equal(looksLikeToolCall('<invoke name="bash">'), true);
+  assert.equal(looksLikeToolCall('{"tool_call":{}}'), true);
+  assert.equal(looksLikeToolCall('【结论】代码缺陷：奖励表缺少 reward_1001\n【定位】A.cs:12'), false);
+});
+
+test('a chat answer that is really a tool call is retried once', async () => {
+  let calls = 0;
+  const chat = async () => {
+    calls += 1;
+    if (calls === 1) return { text: '<|DSML| invoke name="bash"><|DSML| parameter name="command">ls' };
+    return { text: '【结论】代码缺陷：走错分支\n【定位】A.cs:12' };
+  };
+  const warnings = [];
+
+  const res = await runAnalysis({
+    prompt: 'p',
+    repoDir: 'C:/repo',
+    run: async () => ({ code: 0, stdout: '', stderr: '' }),
+    chat,
+    attempts: [{ label: 'deepseek', kind: 'chat', model: 'm', timeoutSec: 5 }],
+    log: { warn: (m) => warnings.push(m) },
+  });
+
+  assert.equal(calls, 2);
+  assert.match(res.text, /【结论】代码缺陷/);
+  assert.equal(warnings.length, 1);
+});
+
+test('a second tool-call answer fails over to the next engine', async () => {
+  let calls = 0;
+  const chat = async () => {
+    calls += 1;
+    return { text: '<|DSML| invoke name="bash">' };
+  };
+  let spawned = 0;
+
+  const res = await runAnalysis({
+    prompt: 'p',
+    repoDir: 'C:/repo',
+    run: async () => {
+      spawned += 1;
+      return { code: 0, stdout: '【结论】配置缺失：表格没导入', stderr: '' };
+    },
+    chat,
+    attempts: [
+      { label: 'deepseek', kind: 'chat', model: 'm', timeoutSec: 5 },
+      { label: 'codex', command: 'codex', timeoutSec: 5 },
+    ],
+    log: { warn() {} },
+  });
+
+  assert.equal(calls, 2, 'one retry, then give up on that engine');
+  assert.equal(spawned, 1);
+  assert.equal(res.engine, 'codex');
+});

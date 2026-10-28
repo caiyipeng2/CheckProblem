@@ -65,6 +65,7 @@ const engine = createEngine({
       repoDir: config.repo.dir,
       attempts: config.analyze.attempts,
       run,
+      log,
       chat: ({ prompt, attempt }) =>
         askChat({
           prompt,

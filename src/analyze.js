@@ -116,6 +116,8 @@ function codexArgs({ repoDir, model, reasoningEffort, extraArgs = [] }) {
 function normaliseAttempts({ attempts, command = 'codex', timeoutSec = 600 }) {
   const list = Array.isArray(attempts) && attempts.length > 0 ? attempts : [{ command, timeoutSec }];
   return list.map((attempt) => ({
+    ...attempt,
+    kind: attempt.kind === 'chat' ? 'chat' : 'codex',
     label: attempt.label ?? attempt.model ?? attempt.command ?? 'codex',
     command: attempt.command ?? 'codex',
     model: attempt.model,
@@ -128,11 +130,33 @@ function normaliseAttempts({ attempts, command = 'codex', timeoutSec = 600 }) {
 // Tries each configured engine in order and returns the first usable answer. A
 // slow or failing engine costs only its own budget, and the reply always says
 // which engine produced the text.
-export async function runAnalysis({ prompt, repoDir, run, attempts, command, timeoutSec }) {
+export async function runAnalysis({ prompt, repoDir, run, chat, attempts, command, timeoutSec }) {
   const failures = [];
 
   for (const attempt of normaliseAttempts({ attempts, command, timeoutSec })) {
     const started = Date.now();
+
+    // A chat engine is a single request over the digest already in the prompt,
+    // so it needs no process and no repository access.
+    if (attempt.kind === 'chat') {
+      if (typeof chat !== 'function') {
+        failures.push(`${attempt.label}: 未配置 chat 调用`);
+        continue;
+      }
+      try {
+        const { text } = await chat({ prompt, attempt });
+        const cleaned = cleanOutput(text);
+        if (!cleaned) {
+          failures.push(`${attempt.label}: 空输出`);
+          continue;
+        }
+        return { text: cleaned, engine: attempt.label, elapsedMs: Date.now() - started };
+      } catch (err) {
+        failures.push(`${attempt.label}: ${err instanceof Error ? err.message : String(err)}`);
+        continue;
+      }
+    }
+
     let res;
     try {
       res = await run(attempt.command, codexArgs({ repoDir, ...attempt }), {

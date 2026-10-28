@@ -304,3 +304,64 @@ test('buildPrompt says so when the search found nothing', async () => {
   assert.match(prompt, /本地检索线索】（无/);
   assert.doesNotMatch(prompt, /Assets\/Config/);
 });
+
+test('a chat engine is used first and falls through to codex when it fails', async () => {
+  const order = [];
+  const chat = async ({ attempt }) => {
+    order.push(`chat:${attempt.label}`);
+    throw new Error('401 bad key');
+  };
+  const run = async () => {
+    order.push('codex');
+    return { code: 0, stdout: '【结论】配置缺失', stderr: '' };
+  };
+
+  const res = await runAnalysis({
+    prompt: 'p',
+    repoDir: 'C:/repo',
+    run,
+    chat,
+    attempts: [
+      { label: 'deepseek', kind: 'chat', baseUrl: 'https://x', model: 'deepseek-chat', timeoutSec: 5 },
+      { label: 'codex-fast', command: 'codex', timeoutSec: 5 },
+    ],
+  });
+
+  assert.deepEqual(order, ['chat:deepseek', 'codex']);
+  assert.equal(res.engine, 'codex-fast');
+});
+
+test('a chat answer alone is enough, and no process is spawned for it', async () => {
+  let spawned = 0;
+  const chat = async () => ({ text: '  【结论】配置缺失  ' });
+  const run = async () => {
+    spawned += 1;
+    return { code: 0, stdout: 'nope', stderr: '' };
+  };
+
+  const res = await runAnalysis({
+    prompt: 'p',
+    repoDir: 'C:/repo',
+    run,
+    chat,
+    attempts: [{ label: 'deepseek', kind: 'chat', model: 'deepseek-chat', timeoutSec: 5 }],
+  });
+
+  assert.equal(res.text, '【结论】配置缺失');
+  assert.equal(res.engine, 'deepseek');
+  assert.equal(spawned, 0);
+});
+
+test('a chat attempt without a configured client is skipped, not fatal', async () => {
+  const run = async () => ({ code: 0, stdout: '【结论】ok', stderr: '' });
+  const res = await runAnalysis({
+    prompt: 'p',
+    repoDir: 'C:/repo',
+    run,
+    attempts: [
+      { label: 'deepseek', kind: 'chat', model: 'deepseek-chat', timeoutSec: 5 },
+      { label: 'codex', command: 'codex', timeoutSec: 5 },
+    ],
+  });
+  assert.equal(res.engine, 'codex');
+});

@@ -6,7 +6,7 @@
 // Patterns travel in a UTF-8 file (`git grep -f`), never in argv: the runner
 // goes through cmd.exe, whose code page would mangle Chinese keywords.
 
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -102,7 +102,14 @@ function rank(byPath, terms) {
     .slice(0, MAX_FILES);
 }
 
-export async function collectEvidence({ question, repoDir, run, timeoutMs = 60_000, log = null }) {
+export async function collectEvidence({
+  question,
+  repoDir,
+  run,
+  timeoutMs = 60_000,
+  log = null,
+  readFile = readFileSync,
+}) {
   const terms = extractTerms(question);
   if (terms.length === 0) return { terms, files: [], digest: '', note: '问题里没有可检索的词' };
 
@@ -125,7 +132,10 @@ export async function collectEvidence({ question, repoDir, run, timeoutMs = 60_0
     }
 
     const byPath = parseGrep(res.stdout);
-    let files = rank(byPath, terms);
+    let files = rank(byPath, terms).map((file) => ({
+      ...file,
+      snippet: snippetFor(repoDir, file, readFile),
+    }));
 
     let total = files.reduce((n, f) => n + f.lines.length, 0);
     if (total === 0) return { terms, files: [], digest: '', note: '没有命中' };
@@ -146,7 +156,43 @@ function renderDigest(terms, files) {
   const lines = [terms.length ? `命中关键词：${terms.join('、')}` : '', ''];
   for (const file of files) {
     lines.push(file.path);
-    for (const hit of file.lines) lines.push(`  ${hit.line}: ${hit.text}`);
+    if (file.snippet) {
+      lines.push(file.snippet);
+    } else {
+      for (const hit of file.lines) lines.push(`  ${hit.line}: ${hit.text}`);
+    }
+    lines.push('');
   }
   return lines.join('\n').trim();
+}
+
+const SNIPPET_RADIUS = 20;
+const SNIPPET_MAX_PER_FILE = 4000;
+
+// Code around each hit, because a model reasoning over a window beats a model
+// that has to grep for itself. The radius is small enough that eight files stay
+// inside the prompt budget.
+function snippetFor(repoDir, file, readFile) {
+  let text;
+  try {
+    text = readFile(join(repoDir, file.path), 'utf8');
+  } catch {
+    return '';
+  }
+  const all = String(text).split(/\r?\n/);
+  const wanted = new Set();
+  for (const hit of file.lines) {
+    const from = Math.max(1, hit.line - SNIPPET_RADIUS);
+    const to = Math.min(all.length, hit.line + SNIPPET_RADIUS);
+    for (let n = from; n <= to; n += 1) wanted.add(n);
+  }
+
+  const out = [];
+  let previous = 0;
+  for (const n of [...wanted].sort((a, b) => a - b)) {
+    if (previous !== 0 && n !== previous + 1) out.push('  …');
+    out.push(`${n}: ${all[n - 1]}`);
+    previous = n;
+  }
+  return out.join('\n').slice(0, SNIPPET_MAX_PER_FILE);
 }

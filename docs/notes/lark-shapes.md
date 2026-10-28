@@ -109,10 +109,10 @@ lark-cli api GET /open-apis/im/v1/messages \
 
 ### mentions
 
-Lark 文档中 `items[]` 可含顶层 `mentions` 数组（本租户暂未采集到样本，未实测）：
+`items[]` 可含顶层 `mentions` 数组。**实测形状**（注意 `id` 是裸字符串，不是 Lark 文档里的 `{"open_id": ...}` 对象）：
 
 ```json
-[{ "key": "@_user_1", "id": { "open_id": "ou_xxx" }, "name": "显示名", "tenant_key": "..." }]
+[{ "key": "@_user_1", "id": "ou_xxx", "id_type": "open_id", "name": "显示名", "tenant_key": "..." }]
 ```
 
 含 @ 的 text 正文里该位置被替换为 `@_user_1` 之类的占位符，**不会出现人名原文**。
@@ -162,3 +162,15 @@ lark-cli contact +get-user --user-id ou_xxx --as user --json
 ```
 
 `data.user.name` 可直接用作确认人显示名。该命令不受 reactions scope 门禁影响。
+
+## 6. codex exec 实测（0.147.0）
+
+```
+codex exec -C <dir> -s read-only --color never --ephemeral -   # prompt 从 stdin
+```
+
+- **stdout 只有最终回答**（实测「收到」两字，7 字节）；横幅、user 回显、工具调用、tokens 统计全在 stderr。
+  因此 `cleanOutput(stdout)` 即可，不需要解析 stderr。
+- 失败信息（`ERROR: Reconnecting... 1/5`）也出现在 stderr；退出码非 0 视为失败。
+- 模型 `gpt-6.1-sol`、reasoning effort `max`：一句「只回答两个字」的调用实测耗时数分钟，
+  期间出现过一次重连。`analyze.timeoutSec` 取 600 可能偏紧，真实分析需更长预算。

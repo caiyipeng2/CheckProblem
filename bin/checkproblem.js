@@ -3,6 +3,7 @@
 // particular the engine owns crash recovery for a `running` job on its first
 // tick, so nothing here inspects or rewrites the loaded state.
 
+import { mkdirSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { loadConfig } from '../src/config.js';
@@ -13,6 +14,7 @@ import { syncRepo } from '../src/repo.js';
 import { runAnalysis } from '../src/analyze.js';
 import { createEngine } from '../src/index.js';
 import { run } from '../src/runner.js';
+import { acquireLock, releaseLock } from '../src/lock.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const args = process.argv.slice(2);
@@ -30,6 +32,18 @@ const config = loadConfig(configPath);
 if (dryRunFlag) config.dryRun = true;
 
 const log = createLogger({ dir: config.paths.logDir });
+
+// Two pollers would double-reply and fight over the cursor, so a second copy
+// exits before it touches anything.
+const lockFile = join(config.root, 'state', 'checkproblem.lock');
+mkdirSync(dirname(lockFile), { recursive: true });
+const lock = acquireLock(lockFile);
+if (!lock.ok) {
+  log.error(`another instance is already running (pid ${lock.pid}) — stop it first`);
+  process.exit(1);
+}
+process.on('exit', () => releaseLock(lockFile));
+
 const state = loadState(config.paths.stateFile, Date.now());
 
 const lark = createLark({ run, dryRun: config.dryRun, log });
@@ -46,8 +60,7 @@ const engine = createEngine({
     runAnalysis({
       prompt,
       repoDir: config.repo.dir,
-      timeoutSec: config.analyze.timeoutSec,
-      command: config.analyze.command,
+      attempts: config.analyze.attempts,
       run,
     }),
 });

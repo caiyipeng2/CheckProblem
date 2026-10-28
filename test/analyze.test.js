@@ -113,6 +113,36 @@ test('runAnalysis passes exact argv, stdin and a millisecond timeout', async () 
   );
 });
 
+test('runAnalysis reports a timeout as such instead of echoing the transcript', async () => {
+  const timedOut = async () => ({
+    code: 124,
+    stdout: '',
+    stderr: 'OpenAI Codex v0.147.0\n--------\nworkdir: C:/repo\nuser\n【硬性约束】\n分析超时（900 秒）',
+  });
+  await assert.rejects(
+    () => runAnalysis({ prompt: 'p', repoDir: '/r', timeoutSec: 900, command: 'codex', run: timedOut }),
+    (err) => {
+      assert.match(err.message, /超时（900 秒）/);
+      assert.doesNotMatch(err.message, /OpenAI Codex/);
+      assert.doesNotMatch(err.message, /workdir/);
+      return true;
+    },
+  );
+});
+
+test('runAnalysis quotes the end of stderr, where codex puts the real error', async () => {
+  const banner = 'OpenAI Codex v0.147.0\n--------\nuser\n' + 'x'.repeat(4000);
+  const fail = async () => ({ code: 3, stdout: '', stderr: `${banner}\nERROR: model unavailable` });
+  await assert.rejects(
+    () => runAnalysis({ prompt: 'p', repoDir: '/r', timeoutSec: 5, command: 'codex', run: fail }),
+    (err) => {
+      assert.match(err.message, /ERROR: model unavailable/);
+      assert.doesNotMatch(err.message, /OpenAI Codex/);
+      return true;
+    },
+  );
+});
+
 test('runAnalysis rejects with the exit code and stderr on failure', async () => {
   const fail = async () => ({ code: 1, stdout: '', stderr: 'ERROR: Reconnecting... 1/5' });
   await assert.rejects(
@@ -143,7 +173,7 @@ test('runAnalysis reports a non-empty cause when stdout and stderr are blank', a
     await assert.rejects(
       () => runAnalysis({ prompt: 'p', repoDir: '/r', timeoutSec: 5, command: 'codex', run }),
       (err) => {
-        assert.match(err.message, /exit 1\): \S/, 'the error message ends with a dangling colon');
+        assert.match(err.message, /exit 1 \S/, 'the cause must not be a dangling colon');
         return true;
       },
     );
@@ -154,22 +184,78 @@ test('runAnalysis rejects whitespace-only stdout as empty', async () => {
   const empty = async () => ({ code: 0, stdout: '   \n\n', stderr: '' });
   await assert.rejects(
     () => runAnalysis({ prompt: 'p', repoDir: '/r', timeoutSec: 5, command: 'codex', run: empty }),
-    /empty/,
+    /空输出/,
   );
 });
 
-test('runAnalysis wraps a throwing run with the analysis step and keeps the cause', async () => {
-  const boom = new Error('spawn codex ENOENT');
+test('runAnalysis reports which engine threw instead of swallowing it', async () => {
   const run = async () => {
-    throw boom;
+    throw new Error('spawn codex ENOENT');
   };
   await assert.rejects(
     () => runAnalysis({ prompt: 'p', repoDir: '/r', timeoutSec: 5, command: 'codex', run }),
     (err) => {
-      assert.match(err.message, /codex 调用失败/);
-      assert.match(err.message, /spawn codex ENOENT/);
-      assert.equal(err.cause, boom);
+      assert.match(err.message, /所有分析引擎都失败/);
+      assert.match(err.message, /codex: 调用失败 spawn codex ENOENT/);
       return true;
     },
   );
+});
+
+test('runAnalysis falls back to the next engine when the first one times out', async () => {
+  const seen = [];
+  const run = async (cmd, args, opts) => {
+    seen.push({ cmd, args, opts });
+    if (seen.length === 1) return { code: 124, stdout: '', stderr: '分析超时（180 秒）' };
+    return { code: 0, stdout: '【结论】配置缺失', stderr: '' };
+  };
+
+  const res = await runAnalysis({
+    prompt: 'p',
+    repoDir: 'C:/repo',
+    run,
+    attempts: [
+      { label: 'codex-fast', command: 'codex', model: 'gpt-5.6-luna', reasoningEffort: 'low', timeoutSec: 180 },
+      { label: 'deepseek', command: 'codex', model: 'deepseek-chat', timeoutSec: 420 },
+    ],
+  });
+
+  assert.equal(res.text, '【结论】配置缺失');
+  assert.equal(res.engine, 'deepseek');
+  assert.equal(seen.length, 2);
+  assert.deepEqual(seen[0].opts, { stdin: 'p', timeoutMs: 180_000 });
+  assert.deepEqual(seen[1].opts, { stdin: 'p', timeoutMs: 420_000 });
+  assert.deepEqual(seen[0].args.slice(0, 7), ['exec', '-C', 'C:/repo', '-s', 'read-only', '--color', 'never']);
+  assert.ok(seen[0].args.includes('--ephemeral'));
+  assert.deepEqual(seen[0].args.slice(-5), ['-m', 'gpt-5.6-luna', '-c', 'model_reasoning_effort="low"', '-']);
+  assert.deepEqual(seen[1].args.slice(-3), ['-m', 'deepseek-chat', '-']);
+  assert.equal(seen.every((c) => c.args.at(-1) === '-'), true, 'every attempt reads the prompt from stdin');
+});
+
+test('runAnalysis reports every engine it tried when all of them fail', async () => {
+  let n = 0;
+  const run = async () => {
+    n += 1;
+    return n === 1
+      ? { code: 124, stdout: '', stderr: 'x' }
+      : { code: 1, stdout: '', stderr: 'ERROR: model not supported' };
+  };
+  await assert.rejects(
+    () =>
+      runAnalysis({
+        prompt: 'p',
+        repoDir: '/r',
+        run,
+        attempts: [
+          { label: 'fast', timeoutSec: 1 },
+          { label: 'backup', model: 'deepseek-chat', timeoutSec: 2 },
+        ],
+      }),
+    (err) => {
+      assert.match(err.message, /fast: 超时（1 秒）/);
+      assert.match(err.message, /backup: exit 1 .*model not supported/);
+      return true;
+    },
+  );
+  assert.equal(n, 2, 'the second engine is still tried after the first fails');
 });

@@ -76,31 +76,86 @@ export function cleanOutput(raw) {
     .trim();
 }
 
-export async function runAnalysis({ prompt, repoDir, timeoutSec, command, run }) {
-  let res;
-  try {
-    // The trailing '-' tells codex to read the prompt from stdin; the banner,
+// Kept in step with the runner's TIMEOUT_EXIT. This module stays import-free, so
+// the value is repeated rather than shared.
+const TIMEOUT_EXIT = 124;
+
+// The sandbox flags are fixed here, never taken from config: whatever engine an
+// attempt names, it can only ever read the clone.
+function codexArgs({ repoDir, model, reasoningEffort, extraArgs = [] }) {
+  return [
+    'exec',
+    '-C',
+    repoDir,
+    '-s',
+    'read-only',
+    '--color',
+    'never',
+    '--ephemeral',
+    ...(model ? ['-m', model] : []),
+    ...(reasoningEffort ? ['-c', `model_reasoning_effort="${reasoningEffort}"`] : []),
+    ...extraArgs,
+    // The trailing '-' tells the CLI to read the prompt from stdin; the banner,
     // tool calls and token report go to stderr, so stdout is the final answer.
-    res = await run(
-      command,
-      ['exec', '-C', repoDir, '-s', 'read-only', '--color', 'never', '--ephemeral', '-'],
-      { stdin: prompt, timeoutMs: timeoutSec * 1000 },
-    );
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    throw new Error(`codex 调用失败: ${message}`, { cause: err });
+    '-',
+  ];
+}
+
+function normaliseAttempts({ attempts, command = 'codex', timeoutSec = 600 }) {
+  const list = Array.isArray(attempts) && attempts.length > 0 ? attempts : [{ command, timeoutSec }];
+  return list.map((attempt) => ({
+    label: attempt.label ?? attempt.model ?? attempt.command ?? 'codex',
+    command: attempt.command ?? 'codex',
+    model: attempt.model,
+    reasoningEffort: attempt.reasoningEffort,
+    extraArgs: Array.isArray(attempt.extraArgs) ? attempt.extraArgs : [],
+    timeoutSec: Number.isFinite(attempt.timeoutSec) ? attempt.timeoutSec : timeoutSec,
+  }));
+}
+
+// Tries each configured engine in order and returns the first usable answer. A
+// slow or failing engine costs only its own budget, and the reply always says
+// which engine produced the text.
+export async function runAnalysis({ prompt, repoDir, run, attempts, command, timeoutSec }) {
+  const failures = [];
+
+  for (const attempt of normaliseAttempts({ attempts, command, timeoutSec })) {
+    const started = Date.now();
+    let res;
+    try {
+      res = await run(attempt.command, codexArgs({ repoDir, ...attempt }), {
+        stdin: prompt,
+        timeoutMs: attempt.timeoutSec * 1000,
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      failures.push(`${attempt.label}: 调用失败 ${message}`);
+      continue;
+    }
+
+    if (res.code === TIMEOUT_EXIT) {
+      failures.push(`${attempt.label}: 超时（${attempt.timeoutSec} 秒）`);
+      continue;
+    }
+
+    if (res.code !== 0) {
+      // The head of stderr is the banner and an echo of the prompt; the cause is
+      // at the end, and on a timeout the runner appends its note there too.
+      const stderr = String(res.stderr ?? '').trim();
+      const stdout = String(res.stdout ?? '').trim();
+      const detail = (stderr || stdout).slice(-300) || '无输出（进程可能已被终止）';
+      failures.push(`${attempt.label}: exit ${res.code} ${detail}`);
+      continue;
+    }
+
+    const text = cleanOutput(res.stdout);
+    if (!text) {
+      failures.push(`${attempt.label}: 空输出`);
+      continue;
+    }
+
+    return { text, engine: attempt.label, elapsedMs: Date.now() - started };
   }
 
-  if (res.code !== 0) {
-    // A timeout kill often leaves both streams blank; fall back to a readable
-    // cause instead of emitting a dangling colon to the group.
-    const stderr = String(res.stderr ?? '').trim();
-    const stdout = String(res.stdout ?? '').trim();
-    const detail = (stderr || stdout).slice(0, 300) || '无输出（进程可能已被终止）';
-    throw new Error(`codex exec failed (exit ${res.code}): ${detail}`);
-  }
-
-  const text = cleanOutput(res.stdout);
-  if (!text) throw new Error('codex exec returned empty output');
-  return { text };
+  throw new Error(`所有分析引擎都失败：${failures.join('；')}`);
 }

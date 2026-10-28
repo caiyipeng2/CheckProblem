@@ -52,7 +52,7 @@ node bin/checkproblem.js --config D:\path\config.local.json
 
 - 前台运行时按 Ctrl+C，或直接关闭终端窗口；也可以在任务管理器里结束对应的 `node.exe`（先确认命令行是 `bin/checkproblem.js`，不要误杀其他 node 进程）。
 - 分析进行中被停掉，下次启动会向原消息回复 `上次分析中断，请重新发起`，不会自动重试。
-- 不要同时运行两个实例。服务没有单实例锁，两个进程共用同一份状态文件，可能重复回复、互相覆盖游标。
+- 同一时间只允许一个实例：启动时会在 `state/checkproblem.lock` 写自己的 pid，已有一个存活实例时新进程直接报 `another instance is already running (pid N)` 并以退出码 1 结束。异常退出留下的锁会按 pid 自动接管，不需要手工删除。
 
 ## 状态与日志
 
@@ -70,7 +70,8 @@ node bin/checkproblem.js --config D:\path\config.local.json
 | 确认窗口 | 600 秒 | `confirmTimeoutSec`；超时后回复 `查询请求已超时，如需分析请重新发起。` |
 | 子进程默认超时 | 120 秒 | 未单独指定预算的调用：lark-cli 读写、git reset/clean/rev-parse、通讯录查询 |
 | git clone / fetch | 1800 秒 | 网络操作，超时按失败处理 |
-| codex 分析 | 900 秒 | `analyze.timeoutSec`；超时被终止，退出码 124 |
+| 分析主引擎 | 240 秒 | `analyze.attempts[0]`（`codex-fast`，low 推理）；超时即放弃该引擎，转为下一个 |
+| 分析备用引擎 | 600 秒 | `analyze.attempts[1]`（`codex-deep`，默认模型与推理档）；前一个失败或超时才启动 |
 | 消息页大小 | 50 条 | 固定值，不翻页 |
 | 回复长度 | 4000 字符 | `maxReplyChars`，包含落款 |
 
@@ -84,7 +85,7 @@ node bin/checkproblem.js --config D:\path\config.local.json
 | 日志持续出现 `tick failed (N in a row): …`，错误信息为 token 无效/过期、鉴权失败一类 | 用户 access token 过期或被撤销。服务不会自己重新登录，只会每轮记一条失败；连续 5 次会额外打一行告警 | 重新执行 `lark-cli auth login`（必要时带上原有 scope），观察下一轮日志；仍失败再重启服务 |
 | 群里有新消息但服务毫无反应，日志只有启动行或没有新事件 | `config.json` 的 `chatId` 不是目标群；`triggerKeyword` 与消息里的写法不一致；或游标已经越过这条消息（服务停机期间收到的、且仍在新一页里的消息会在重启后被处理；超出最新 50 条的旧消息则看不到） | 核对 `chatId` 和 `triggerKeyword`；把消息时间与 `state/state.json` 的 `lastSeen.createTimeMs` 对比；停服删除 `state/state.json` 后重启（游标重置为启动时刻），再发一条含触发词的新消息 |
 | 群回复 `分析失败：git clone failed: …` 或 `分析失败：git fetch failed: …` | 访问仓库失败、磁盘不足、git 凭据失效，或 `repo/Idle_Outpost` 是上次中断留下的半成品目录 | clone/fetch 预算 30 分钟，仓库约 4 GB：检查网络、磁盘空间、`repo.url` 和 git 凭据。若目录存在但不是有效 clone（没有 `.git` 或内容不全），停服后删除整个 `repo/Idle_Outpost` 让服务重新 clone |
-| 群回复 `分析失败：codex exec failed (exit 124): …`，错误详情里可能带 `分析超时（900 秒）` | codex 超过 `analyze.timeoutSec`（默认 900 秒）被终止 | 原任务已结束，重新发起问题即可。频繁超时可提高 `analyze.timeoutSec` 后重启，并检查 codex 登录态、网络和模型配额。分析是只读的，重跑没有副作用 |
+| 群回复 `分析失败：所有分析引擎都失败：codex-fast: 超时（240 秒）；codex-deep: …` | 所有引擎都没能在各自预算内给出答案 | 原任务已结束，重新发起即可。频繁失败可调大 `analyze.attempts` 里的 `timeoutSec`，或换更快的模型；同时检查 codex 登录态、网络与模型配额。分析是只读的，重跑没有副作用 |
 | 群回复其它 `分析失败：…` | git reset/clean 失败、codex 非零退出或空输出、回复消息失败等 | 按日志中 `analysis failed for <message_id>: …` 的完整错误处理；修好后重新发触发消息（原触发消息已标记为已读，不会自动重来） |
 | 任务卡住：`state/state.json` 里的 `job` 一直不为 `null`，或需要强制复位 | 进程被强杀/崩溃留下 `running` 任务；或状态文件被外部异常修改 | 先停服。普通崩溃残留直接重启即可：首轮会向原消息回复 `上次分析中断，请重新发起` 并清空 `running`。若仍卡住，删除 `state/state.json` 再启动。删除会重置游标到启动时刻：历史消息和停机期间的消息都不会重放，也不会补发中断提示，需要处理就重新发一条触发消息 |
 
@@ -104,8 +105,18 @@ node bin/checkproblem.js --config D:\path\config.local.json
 | `repo.url` | 无默认 | Idle_Outpost 的 git 地址，首次 clone 使用 |
 | `repo.dir` | 无默认；当前为 `repo/Idle_Outpost` | 专用 clone 目录；相对路径按配置文件目录解析 |
 | `repo.branch` | `"master"` | 同步分支 |
-| `analyze.timeoutSec` | `900` | 单次 codex 超时，秒 |
-| `analyze.command` | `"codex"` | codex 可执行名 |
+| `analyze.attempts` | 见下 | 按顺序尝试的分析引擎，每个有自己的预算 |
+
+`analyze.attempts` 的默认值：
+
+```json
+[
+  { "label": "codex-fast", "command": "codex", "model": "gpt-5.6-luna", "reasoningEffort": "low", "timeoutSec": 240 },
+  { "label": "codex-deep", "command": "codex", "timeoutSec": 600 }
+]
+```
+
+每项可写 `label`、`command`、`model`、`reasoningEffort`、`timeoutSec`，可选 `extraArgs`（追加在提示词 `-` 之前的参数）。只读沙箱参数固定由代码提供，配置无法放宽。第一个引擎超时或失败后立刻尝试下一个，回复里不区分来源，但日志会记录实际使用的是哪个引擎。
 | `dryRun` | `false` | 为 `true` 时等价于命令行加 `--dry-run` |
 
 几点注意：
@@ -160,6 +171,6 @@ schtasks /Delete /TN "CheckProblem" /F
 
 - 机器人无法加入该群，`im +…` 快捷命令所需的 `im:message.reactions:read` 在本租户也无法授予。服务只能用个人身份调原始 API，确认只能靠群成员文字回复（`确认` / `取消`，另接受 `同意`、`开始`、`1` / `忽略`、`不用` 等少量同义词），没有卡片按钮。
 - 同一时间只处理一个任务：等待确认期间，新的「蔡龙」提问会收到「已有查询待确认，请先确认或取消。」的提示，不会排队；分析进行中到达的提问会在本轮结束后由下一次轮询处理（同理只处理最新一页）。
-- 两次轮询之间如果冒出超过约 50 条消息，触发消息可能已经不在最新一页（固定 50 条、不翻页）；游标会推进到已读到的最新消息，这条提问就被漏掉。轮询是串行的：一次分析期间（最长 900 秒）完全不轮询，所以真正的「漏消息窗口」是这次分析加上前后各一个轮询间隔，而不是 15 秒。
+- 两次轮询之间如果冒出超过约 50 条消息，触发消息可能已经不在最新一页（固定 50 条、不翻页）；游标会推进到已读到的最新消息，这条提问就被漏掉。轮询是串行的：一次分析期间（最长为主引擎 + 备用引擎的预算之和）完全不轮询，所以真正的「漏消息窗口」是这次分析加上前后各一个轮询间隔，而不是 15 秒。
 - 分析是只读的：codex 在 `-s read-only` 沙箱里运行，只检索代码，不会修改 clone；真正的写操作只有 git 同步。
 - 游标跨重启保留：服务停机期间群里的消息不会丢，重启后凡是仍在最新 50 条内的，会照常触发（可能补发一次确认提示）。要避免这种补发，停服删除 `state/state.json`，重启后只处理启动之后的消息。

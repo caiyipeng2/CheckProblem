@@ -11,6 +11,21 @@
     "dir": "repo/Idle_Outpost",
     "branch": "master"
   },
-  "analyze": { "timeoutSec": 900, "command": "codex" },
+  "analyze": {
+    "attempts": [
+      {
+        "label": "codex-fast",
+        "command": "codex",
+        "model": "gpt-5.6-luna",
+        "reasoningEffort": "low",
+        "timeoutSec": 240
+      },
+      {
+        "label": "codex-deep",
+        "command": "codex",
+        "timeoutSec": 600
+      }
+    ]
+  },
   "dryRun": false
 }

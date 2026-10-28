@@ -7,7 +7,14 @@ const DEFAULTS = {
   pollIntervalSec: 15,
   contextMessages: 5,
   maxReplyChars: 4000,
-  analyze: { timeoutSec: 900, command: 'codex' },
+  // Tried in order; a slow engine only costs its own budget before the next one
+  // starts. Every attempt still runs codex-shaped and read-only.
+  analyze: {
+    attempts: [
+      { label: 'codex-fast', command: 'codex', model: 'gpt-5.6-luna', reasoningEffort: 'low', timeoutSec: 240 },
+      { label: 'codex-deep', command: 'codex', timeoutSec: 600 },
+    ],
+  },
   dryRun: false,
 };
 
@@ -24,7 +31,14 @@ export function loadConfig(filePath) {
   return {
     ...DEFAULTS,
     ...raw,
-    analyze: { ...DEFAULTS.analyze, ...(raw.analyze ?? {}) },
+    analyze: {
+      ...DEFAULTS.analyze,
+      ...(raw.analyze ?? {}),
+      attempts:
+        Array.isArray(raw.analyze?.attempts) && raw.analyze.attempts.length > 0
+          ? raw.analyze.attempts
+          : DEFAULTS.analyze.attempts,
+    },
     repo,
     root,
     paths: {

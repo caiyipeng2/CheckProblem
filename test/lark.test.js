@@ -220,3 +220,29 @@ test('getSenderName returns an empty string instead of throwing', async () => {
 
   assert.equal(warnings.length, 3);
 });
+
+test('reply rejects an unsafe message id before calling run', async () => {
+  const { calls, run } = capture(() => envelope({ message_id: 'om_reply' }));
+  const lark = createLark({ run });
+
+  await assert.rejects(() => lark.reply('om_1; rm -rf /', 'x'), LarkError);
+  assert.equal(calls.length, 0);
+});
+
+test('listMessages rejects an unsafe chat id', async () => {
+  const { calls, run } = capture(() => envelope({ items: ITEMS }));
+  const lark = createLark({ run });
+
+  await assert.rejects(() => lark.listMessages('oc_x y'), LarkError);
+  assert.equal(calls.length, 0);
+});
+
+test('getSenderName returns an empty string for an unsafe open id', async () => {
+  const warnings = [];
+  const { calls, run } = capture(() => envelope({ user: { name: '南柯' } }));
+  const lark = createLark({ run, log: { info: () => {}, warn: (m) => warnings.push(m) } });
+
+  assert.equal(await lark.getSenderName('bad id'), '');
+  assert.equal(calls.length, 0);
+  assert.equal(warnings.length, 1);
+});

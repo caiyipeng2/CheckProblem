@@ -10,6 +10,8 @@ const IDENTITY = ['--as', 'user', '--json'];
 
 const MESSAGES_PATH = '/open-apis/im/v1/messages';
 
+const SAFE_ID = /^[A-Za-z0-9_-]+$/;
+
 export class LarkError extends Error {
   constructor(message, { code = null, missingScopes = [] } = {}) {
     super(message);
@@ -17,6 +19,13 @@ export class LarkError extends Error {
     this.code = code;
     this.missingScopes = missingScopes;
   }
+}
+
+// Ids come from the network and are interpolated into CLI arguments and the API
+// path, so accept only the character set Feishu actually uses.
+function requireSafeId(field, value) {
+  if (typeof value === 'string' && SAFE_ID.test(value)) return value;
+  throw new LarkError(`invalid ${field}: ${String(value).slice(0, 40)}`);
 }
 
 // A failed call still prints its failure envelope on stdout, so stdout is
@@ -57,6 +66,7 @@ export function createLark({ run, dryRun = false, log = null }) {
 
   return {
     async listMessages(chatId, { pageSize = 20 } = {}) {
+      const safeChatId = requireSafeId('chatId', chatId);
       const data = await call([
         'api',
         'GET',
@@ -64,7 +74,7 @@ export function createLark({ run, dryRun = false, log = null }) {
         '--params',
         JSON.stringify({
           container_id_type: 'chat',
-          container_id: chatId,
+          container_id: safeChatId,
           page_size: pageSize,
           sort_type: 'ByCreateTimeAsc',
         }),
@@ -74,14 +84,15 @@ export function createLark({ run, dryRun = false, log = null }) {
     },
 
     async reply(messageId, text) {
+      const safeMessageId = requireSafeId('messageId', messageId);
       if (dryRun) {
-        log?.info?.(`[dry-run] reply ${messageId}: ${String(text).slice(0, 80)}`);
+        log?.info?.(`[dry-run] reply ${safeMessageId}: ${String(text).slice(0, 80)}`);
         return { messageId: 'dry-run' };
       }
       const data = await call([
         'api',
         'POST',
-        `${MESSAGES_PATH}/${messageId}/reply`,
+        `${MESSAGES_PATH}/${safeMessageId}/reply`,
         // `content` is a JSON string, not an object.
         '--data',
         JSON.stringify({ content: textContent(text), msg_type: 'text' }),
@@ -90,8 +101,9 @@ export function createLark({ run, dryRun = false, log = null }) {
     },
 
     async send(chatId, text) {
+      const safeChatId = requireSafeId('chatId', chatId);
       if (dryRun) {
-        log?.info?.(`[dry-run] send ${chatId}: ${String(text).slice(0, 80)}`);
+        log?.info?.(`[dry-run] send ${safeChatId}: ${String(text).slice(0, 80)}`);
         return { messageId: 'dry-run' };
       }
       const data = await call([
@@ -101,24 +113,30 @@ export function createLark({ run, dryRun = false, log = null }) {
         '--params',
         JSON.stringify({ receive_id_type: 'chat_id' }),
         '--data',
-        JSON.stringify({ receive_id: chatId, msg_type: 'text', content: textContent(text) }),
+        JSON.stringify({ receive_id: safeChatId, msg_type: 'text', content: textContent(text) }),
       ]);
       return { messageId: data.message_id ?? '' };
     },
 
     // Best effort display name; the engine falls back to the raw open_id.
     async getSenderName(openId) {
-      if (!openId) return '';
+      let safeOpenId;
       try {
-        const data = await call(['contact', '+get-user', '--user-id', openId]);
+        safeOpenId = requireSafeId('openId', openId);
+      } catch (err) {
+        log?.warn?.(`[lark] skipping display name lookup: ${err?.message ?? err}`);
+        return '';
+      }
+      try {
+        const data = await call(['contact', '+get-user', '--user-id', safeOpenId]);
         const name = data?.user?.name;
         if (typeof name !== 'string' || name === '') {
-          log?.warn?.(`[lark] no display name for ${openId}`);
+          log?.warn?.(`[lark] no display name for ${safeOpenId}`);
           return '';
         }
         return name;
       } catch (err) {
-        log?.warn?.(`[lark] cannot resolve display name for ${openId}: ${err?.message ?? err}`);
+        log?.warn?.(`[lark] cannot resolve display name for ${safeOpenId}: ${err?.message ?? err}`);
         return '';
       }
     },

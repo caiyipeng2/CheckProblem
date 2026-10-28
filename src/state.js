@@ -3,11 +3,11 @@
 // (e.g. deciding what a `running` job means after a restart); this module
 // restores exactly what was saved.
 
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { timeOf } from './trigger.js';
 
-export function initialState(nowMs) {
+export function initialState(nowMs = Date.now()) {
   return {
     version: 1,
     startedAt: nowMs,
@@ -18,19 +18,40 @@ export function initialState(nowMs) {
   };
 }
 
-export function loadState(file, nowMs) {
+// A cursor is usable only when markSeen can compare it: a finite timestamp and
+// a string id. Anything else would silently freeze the poller, so reject it and
+// let loadState fall back to a fresh cursor.
+function normalizeCursor(raw) {
+  if (raw === null || typeof raw !== 'object') return null;
+  if (!Number.isFinite(Number(raw.createTimeMs))) return null;
+  if (typeof raw.messageId !== 'string') return null;
+  return { createTimeMs: Number(raw.createTimeMs), messageId: raw.messageId };
+}
+
+export function loadState(file, nowMs = Date.now()) {
   try {
     const parsed = JSON.parse(readFileSync(file, 'utf8'));
-    if (parsed?.version !== 1 || !parsed.lastSeen) return initialState(nowMs);
-    return parsed;
+    if (parsed?.version !== 1) return initialState(nowMs);
+    const cursor = normalizeCursor(parsed.lastSeen);
+    if (cursor === null) return initialState(nowMs);
+    return {
+      ...parsed,
+      startedAt: Number.isFinite(parsed.startedAt) ? parsed.startedAt : nowMs,
+      lastSeen: cursor,
+      job:
+        parsed.job !== null && typeof parsed.job === 'object' ? parsed.job : null,
+    };
   } catch {
+    // An unreadable file must not crash-loop the service; saveState's atomic rename below removes the truncation cause.
     return initialState(nowMs);
   }
 }
 
 export function saveState(file, state) {
   mkdirSync(dirname(file), { recursive: true });
-  writeFileSync(file, JSON.stringify(state, null, 2));
+  const tmp = `${file}.tmp`;
+  writeFileSync(tmp, JSON.stringify(state, null, 2));
+  renameSync(tmp, file);
 }
 
 // Monotonic: out-of-order pages must never rewind the cursor. Only strictly

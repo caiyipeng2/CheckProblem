@@ -70,6 +70,49 @@ test('loadState falls back to initialState when lastSeen is missing', (t) => {
   assert.deepEqual(loadState(file, 999), initialState(999));
 });
 
+test('loadState falls back to initialState when the cursor is an empty object', (t) => {
+  const file = tmpFile(t);
+  saveState(file, { version: 1, startedAt: 1, lastSeen: {}, job: null });
+  assert.equal(loadState(file, 4242).lastSeen.createTimeMs, 4242);
+});
+
+test('loadState falls back to initialState when the cursor is a number', (t) => {
+  const file = tmpFile(t);
+  saveState(file, { version: 1, startedAt: 1, lastSeen: 5, job: null });
+  assert.equal(loadState(file, 4243).lastSeen.createTimeMs, 4243);
+});
+
+test('loadState normalizes a numeric-string cursor to a number', (t) => {
+  const file = tmpFile(t);
+  saveState(file, {
+    version: 1,
+    startedAt: 1,
+    lastSeen: { createTimeMs: '5000', messageId: 'om_1' },
+    job: null,
+  });
+  const s = loadState(file, 999);
+  assert.equal(s.lastSeen.createTimeMs, 5000);
+  assert.equal(typeof s.lastSeen.createTimeMs, 'number');
+  assert.equal(s.lastSeen.messageId, 'om_1');
+});
+
+test('a normalized cursor still advances when a newer message arrives', (t) => {
+  const file = tmpFile(t);
+  saveState(file, {
+    version: 1,
+    startedAt: 1,
+    lastSeen: { createTimeMs: '5000', messageId: 'om_1' },
+    job: null,
+  });
+  const s = loadState(file, 999);
+  markSeen(s, { message_id: 'om_2', create_time: '6000' });
+  assert.deepEqual(s.lastSeen, { createTimeMs: 6000, messageId: 'om_2' });
+});
+
+test('initialState with no argument yields a finite cursor timestamp', () => {
+  assert.ok(Number.isFinite(initialState().lastSeen.createTimeMs));
+});
+
 test('markSeen advances cursor and leaves job untouched', () => {
   const s = initialState(0);
   s.job = { status: 'running', triggerMessageId: 'om_1', question: 'q' };
@@ -106,4 +149,14 @@ test('saveState writes readable JSON with the persisted job', (t) => {
   s.job = { status: 'awaiting', triggerMessageId: 'om_1', question: 'q', context: [] };
   saveState(file, s);
   assert.deepEqual(JSON.parse(readFileSync(file, 'utf8')), s);
+});
+
+test('saveState leaves no .tmp file behind', (t) => {
+  const file = tmpFile(t);
+  saveState(file, initialState(Number(T1)));
+  assert.equal(existsSync(`${file}.tmp`), false);
+  assert.deepEqual(JSON.parse(readFileSync(file, 'utf8')).lastSeen, {
+    createTimeMs: Number(T1),
+    messageId: '',
+  });
 });

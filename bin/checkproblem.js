@@ -66,7 +66,19 @@ const lark = createLark({ run, dryRun: config.dryRun, log, botReplies: Boolean(c
 const tapd = config.tapd && Object.keys(config.tapd.workspaces).length
   ? createTapdClient({ tokenFile: config.tapd.tokenFile, baseUrl: config.tapd.baseUrl, log })
   : null;
-if (tapd) log.info(`tapd enabled for ${Object.keys(config.tapd.workspaces).join(', ')}`);
+if (tapd) {
+  log.info(`tapd enabled for ${Object.keys(config.tapd.workspaces).join(', ')}`);
+  // Config validation checks the token path's shape only: the file may be
+  // mounted at deploy time, so a missing one must not fail startup. But a
+  // typo would otherwise surface as a working-looking button that fails on
+  // every press, so probe each project once through the client's own reader
+  // and name the project and path. The token itself is never logged.
+  for (const [projectId, entry] of Object.entries(config.tapd.workspaces)) {
+    if (!resolveApiKey({ apiKeyEnv: '', apiKeyFile: entry.tokenFile })) {
+      log.warn(`tapd: token file for ${projectId} is unreadable or empty: ${entry.tokenFile} — that project cannot file tickets`);
+    }
+  }
+}
 const selectedRepo = (selection) => config.projects
   ? selectProject(config, selection?.id, selection?.branch)
   : config.repo;

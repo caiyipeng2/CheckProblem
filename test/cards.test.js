@@ -107,6 +107,26 @@ test('submitting disables the button and a failure invites a retry', () => {
   assert.match(failed, /TAPD 提单失败：标题不能为空/);
 });
 
+test('a failed submit says the outcome may be unknown before the operator retries', () => {
+  const nodes = walk(buildQueryCard({
+    job: { ...job, ...done, tapd: { status: 'failed', error: '请求超时' } },
+    projects,
+    tapd: tapdEntry,
+  }));
+  const retry = nodes.find((node) => node.tag === 'button' && node.name === 'tapd');
+  assert.ok(retry, 'the retry button is still rendered');
+  assert.equal(retry.disabled, false, 'the operator, not the card, decides whether to retry');
+  assert.ok(retry.text.content.includes('重试提交'));
+
+  const note = nodes.find((node) => node.tag === 'div' && node.text?.content.startsWith('TAPD 提单失败：'));
+  assert.ok(note, 'the failure reason is still shown');
+  assert.ok(note.text.content.includes('TAPD 提单失败：请求超时'), 'the error text survives');
+  // TAPD has no idempotency key and no delete API: a timeout or 5xx after TAPD
+  // committed looks exactly like a total failure, so a retry can duplicate.
+  assert.ok(note.text.content.includes('提交结果可能未知：若上一次请求已发出，请先在 TAPD 确认没有重复单再重试。'),
+    'the card warns that the send may already have landed');
+});
+
 test('an unawaiting job without a finished status never renders the button', () => {
   for (const status of ['awaiting', 'running', 'expired', 'failed', 'cancelled', 'interrupted']) {
     const rendered = JSON.stringify(buildQueryCard({ job: { ...job, status }, projects, tapd: tapdEntry }));

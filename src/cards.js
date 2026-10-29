@@ -70,9 +70,13 @@ export function buildQueryCard({ job, projects, tapd = null }) {
   }])]) : null;
   // A press is booked before the request goes out, so `submitting` also covers
   // "the process died mid-request": the note tells the operator to look at TAPD
-  // rather than trust the card.
+  // rather than trust the card. A `failed` note says the same thing for a
+  // different reason: TAPD has no idempotency key, so a timeout or 5xx after
+  // the write landed is indistinguishable from a total failure, and a blind
+  // retry would file the one ticket nobody can delete. The retry button stays
+  // live; the operator checks TAPD first, the card just says so.
   const tapdNote = job.tapd?.status === 'failed'
-    ? text(`TAPD 提单失败：${String(job.tapd.error).slice(0, 200)}`)
+    ? text(`TAPD 提单失败：${String(job.tapd.error).slice(0, 200)}\n提交结果可能未知：若上一次请求已发出，请先在 TAPD 确认没有重复单再重试。`)
     : job.tapd?.status === 'submitting'
       ? text('若服务已重启，请先在 TAPD 确认是否已建单，避免重复提交。')
       : null;

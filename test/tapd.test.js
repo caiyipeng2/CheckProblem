@@ -82,6 +82,19 @@ test('payload falls back when the model gave no repro', () => {
   assert.match(description, /【操作步骤】\n1\. 按【问题描述】里的操作复现\n/);
 });
 
+test('an analysis outside the five-section contract is refused, never filed', () => {
+  for (const analysis of ['模型给了一段散文，没有任何小节标签', '', '   \n  ', undefined]) {
+    assert.throws(
+      () => buildBugPayload({ report: { ...report, analysis }, entry, projects }),
+      (err) => {
+        assert.match(err.message, /tapd: 分析内容无法解析/);
+        assert.equal(err.unsent, true, 'nothing was sent, so a retry is safe');
+        return true;
+      },
+    );
+  }
+});
+
 test('payload never trusts a name we cannot resolve and keeps configured field values', () => {
   const payload = buildBugPayload({ report, entry, projects });
   assert.equal(payload.workspace_id, '59180547');

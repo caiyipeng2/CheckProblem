@@ -118,6 +118,14 @@ function assembleDescription({ body, analysisBlock, foot }) {
 
 export function buildBugPayload({ report, entry, projects = [] }) {
   const parts = parseAnalysis(report.analysis);
+  // The analysis is the reason this ticket exists. A report whose model ignored
+  // the five-section contract parses to all-empty strings, which would file a
+  // `[项目] ` ticket whose analysis block is （无） — and the operator, who never
+  // saw that text on the card, would not notice. Refuse before a request exists
+  // instead of writing junk into another team's tracker.
+  if (!parts.conclusion && !parts.repro && !parts.location && !parts.evidence && !parts.advice) {
+    throw unsentError('tapd: 分析内容无法解析（缺少五段结构）');
+  }
   const name = projects.find((project) => project.id === report.projectId)?.name ?? report.projectId;
   const question = questionSection(report.question);
   const images = Array.isArray(report.images) ? report.images : [];

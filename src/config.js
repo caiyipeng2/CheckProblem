@@ -84,8 +84,15 @@ export function normalizeTapd(raw, projects) {
     const workspaceId = String(value?.workspaceId ?? '');
     if (!WORKSPACE_ID.test(workspaceId)) throw new Error(`config: tapd.workspaces.${projectId}.workspaceId must be 6-20 digits`);
     // A path is checked for shape only: createTapdClient reads it at ticket time, so the
-    // file may live on a machine that exists only at deploy.
-    const override = value?.tokenFile === undefined ? tokenFile : String(value.tokenFile).trim();
+    // file may live on a machine that exists only at deploy. Same type check as the
+    // top-level tokenFile: String(null) would load as the literal path "null" and fail
+    // only when someone clicks the ticket button. Absent means inherit; present must be
+    // a non-empty string.
+    const rawOverride = value?.tokenFile;
+    if (rawOverride !== undefined && typeof rawOverride !== 'string') {
+      throw new Error(`config: tapd.workspaces.${projectId}.tokenFile must be a string`);
+    }
+    const override = rawOverride === undefined ? tokenFile : rawOverride.trim();
     if (override === '') throw new Error(`config: tapd.workspaces.${projectId}.tokenFile is empty`);
     workspaces[projectId] = { workspaceId, tokenFile: override, fields: { ...base, ...tapdFields(value?.fields, `tapd.workspaces.${projectId}.fields`) } };
   }

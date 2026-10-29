@@ -162,6 +162,24 @@ test('a per-project token file overrides the default', (t) => {
   assert.equal(loadConfig(writeTapd(t, value)).tapd.workspaces.weapon.tokenFile, 'C:/secrets/gear.token');
 });
 
+// A non-string override used to be String()'d, so null loaded as the literal path
+// "null" and startup passed; the failure only surfaced at ticket time. The top-level
+// tokenFile is type-checked, so the override must be too.
+test('a per-project token file must be a non-empty string', (t) => {
+  for (const bad of [null, 123, { path: 'C:/secrets/gear.token' }, '']) {
+    const value = tapdBothProjects();
+    value.tapd.workspaces.weapon.tokenFile = bad;
+    let message = '';
+    try {
+      loadConfig(writeTapd(t, value));
+    } catch (err) {
+      message = err.message;
+    }
+    assert.match(message, /^config: tapd\.workspaces\.weapon\.tokenFile /, String(bad));
+    assert.equal(message.includes('C:/secrets'), false, 'a token path is never echoed');
+  }
+});
+
 test('no tapd section means the feature is off', (t) => {
   const value = tapdBase();
   delete value.tapd;

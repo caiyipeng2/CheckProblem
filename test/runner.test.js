@@ -48,6 +48,14 @@ async function waitForPid(file, budgetMs) {
   }
 }
 
+test('git arguments bypass shell expansion and preserve Unicode branch names', async () => {
+  for (const branch of ['feature/%PATH%', 'feature/DailyTask&ActRankThrehold', 'feature/月卡优化调整']) {
+    const res = await run('git', ['check-ref-format', '--branch', branch]);
+    assert.equal(res.code, 0, res.stderr);
+    assert.equal(res.stdout.trim(), branch);
+  }
+});
+
 test('captures stdout and a zero exit code', async () => {
   const res = await run(NODE, ['-e', "process.stdout.write('done')"]);
   assert.deepEqual(res, { code: 0, stdout: 'done', stderr: '' });

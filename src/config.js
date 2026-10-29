@@ -1,5 +1,17 @@
 import { readFileSync } from 'node:fs';
+import { homedir } from 'node:os';
 import { dirname, join, resolve, isAbsolute } from 'node:path';
+import { normalizeProjects } from './projects.js';
+
+export { normalizeProjects } from './projects.js';
+
+// lark-cli only writes files beneath its allowlist (cwd, the account temp
+// directory, ~/files). Node's os.tmpdir() follows TMP, which is relocated on
+// this machine and refused by the CLI, so prefer the Windows per-user temp.
+export function defaultImagesDir(env = process.env, home = homedir()) {
+  const base = env.LOCALAPPDATA ? join(env.LOCALAPPDATA, 'Temp') : join(home, 'files');
+  return join(base, 'checkproblem-images');
+}
 
 const DEFAULTS = {
   triggerKeyword: '蔡龙',
@@ -28,9 +40,20 @@ export function loadConfig(filePath) {
   const repo = { mode: 'clone', branch: 'master', ...(raw.repo ?? {}) };
   if (repo.dir && !isAbsolute(repo.dir)) repo.dir = join(root, repo.dir);
 
+  const projects = normalizeProjects(raw.projects, root);
+  const projectConfig = {};
+  if (projects !== undefined) {
+    const defaultProjectId = raw.defaultProjectId === undefined ? projects[0].id : raw.defaultProjectId;
+    if (!projects.some((project) => project.id === defaultProjectId)) {
+      throw new Error('config: defaultProjectId must match a configured project id');
+    }
+    Object.assign(projectConfig, { projects, defaultProjectId });
+  }
+
   return {
     ...DEFAULTS,
     ...raw,
+    ...projectConfig,
     analyze: {
       ...DEFAULTS.analyze,
       ...(raw.analyze ?? {}),
@@ -45,6 +68,7 @@ export function loadConfig(filePath) {
       stateFile: join(root, 'state', 'state.json'),
       logDir: join(root, 'logs'),
       jobsDir: join(root, 'logs', 'jobs'),
+      imagesDir: defaultImagesDir(),
     },
   };
 }

@@ -16,7 +16,10 @@ import { createEngine } from '../src/index.js';
 import { run } from '../src/runner.js';
 import { collectEvidence } from '../src/search.js';
 import { askChat, resolveApiKey } from '../src/chat.js';
+import { clearImages } from '../src/images.js';
 import { acquireLock, releaseLock } from '../src/lock.js';
+import { listRemoteBranches, selectProject, syncSelectedProject } from '../src/projects.js';
+import { startCardEvents } from '../src/card-events.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const args = process.argv.slice(2);
@@ -32,6 +35,10 @@ const configPath = configIdx >= 0 ? resolve(args[configIdx + 1]) : join(here, '.
 
 const config = loadConfig(configPath);
 if (dryRunFlag) config.dryRun = true;
+if (config.projects && once && !config.dryRun) {
+  console.error('卡片模式需要持续运行，不能使用 --once');
+  process.exit(1);
+}
 
 const log = createLogger({ dir: config.paths.logDir });
 
@@ -46,9 +53,16 @@ if (!lock.ok) {
 }
 process.on('exit', () => releaseLock(lockFile));
 
+// A crash mid-analysis leaves downloaded screenshots behind; holding the lock
+// proves no other instance can still be reading them.
+clearImages(config.paths.imagesDir);
+
 const state = loadState(config.paths.stateFile, Date.now());
 
-const lark = createLark({ run, dryRun: config.dryRun, log });
+const lark = createLark({ run, dryRun: config.dryRun, log, botReplies: Boolean(config.projects) });
+const selectedRepo = (selection) => config.projects
+  ? selectProject(config, selection?.id, selection?.branch)
+  : config.repo;
 
 const engine = createEngine({
   config,
@@ -57,18 +71,23 @@ const engine = createEngine({
   clock: () => Date.now(),
   log,
   saveState: (s) => saveState(config.paths.stateFile, s),
-  syncRepo: () => syncRepo({ ...config.repo, run, log }),
-  retrieve: (question) => collectEvidence({ question, repoDir: config.repo.dir, run, log }),
-  runAnalysis: (prompt) =>
+  listBranches: (project) => listRemoteBranches({ url: project.url, run }),
+  syncRepo: (selection) => config.projects
+    ? syncSelectedProject({ repo: selectedRepo(selection), run, log })
+    : syncRepo({ ...config.repo, run, log }),
+  retrieve: (question, selection) => collectEvidence({ question, repoDir: selectedRepo(selection).dir, run, log }),
+  runAnalysis: (prompt, selection, options) =>
     runAnalysis({
       prompt,
-      repoDir: config.repo.dir,
+      repoDir: selectedRepo(selection).dir,
       attempts: config.analyze.attempts,
       run,
       log,
-      chat: ({ prompt, attempt }) =>
+      images: options?.images,
+      chat: ({ prompt, attempt, images }) =>
         askChat({
           prompt,
+          images,
           baseUrl: attempt.baseUrl,
           model: attempt.model,
           apiKey: resolveApiKey({ apiKeyEnv: attempt.apiKeyEnv, apiKeyFile: attempt.apiKeyFile }),
@@ -77,42 +96,68 @@ const engine = createEngine({
     }),
 });
 
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-
-// Spec §11: five consecutive failures is the alarm threshold. An expired token
-// is the common cause and it does not clear itself, so say so loudly — but keep
-// polling, because a network blip looks identical from here.
 const ALARM_AFTER_FAILURES = 5;
 
 async function main() {
-  log.info(`starting (once=${once}, dryRun=${config.dryRun}, chat=${config.chatId})`);
+  log.info(`starting (once=${once}, dryRun=${config.dryRun}, cards=${Boolean(config.projects)}, chat=${config.chatId})`);
   let failures = 0;
+  let stopping = false;
+  let eventWake = false;
+  let wake;
+  let listener;
+  const stop = () => { stopping = true; wake?.(); listener?.stop(); };
+  process.on('SIGINT', stop);
+  process.on('SIGTERM', stop);
 
-  for (;;) {
-    try {
-      await engine.tick();
-      failures = 0;
-    } catch (err) {
-      // A revoked scope cannot recover by retrying; everything else is one bad
-      // tick and the loop must survive it.
-      if (err instanceof LarkError && err.missingScopes?.length > 0) {
-        log.error(
-          `missing scopes: ${err.missingScopes.join(', ')} — run lark-cli auth login --scope "<scope>"`,
-        );
+  try {
+    if (config.projects && !config.dryRun) {
+      listener = startCardEvents({
+        log,
+        onEvent: (event) => {
+          if (!stopping && engine.enqueueCardAction(event)) {
+            eventWake = true;
+            wake?.();
+          }
+        },
+      });
+      listener.done.catch((err) => {
+        log.error(`card listener failed: ${err.message}`);
         process.exitCode = 1;
-        return;
-      }
-      failures += 1;
-      log.error(`tick failed (${failures} in a row): ${err?.message ?? err}`);
-      if (failures === ALARM_AFTER_FAILURES) {
-        log.error(
-          `${failures} consecutive failures — if the cause is credentials, run lark-cli auth login and restart`,
-        );
-      }
+        stop();
+      });
+      await listener.ready;
     }
 
-    if (once) return;
-    await sleep(config.pollIntervalSec * 1000);
+    while (!stopping) {
+      eventWake = false;
+      try {
+        await engine.tick();
+        failures = 0;
+      } catch (err) {
+        if (err instanceof LarkError && err.missingScopes?.length > 0) {
+          log.error(`missing scopes: ${err.missingScopes.join(', ')} — check application permissions and the calling identity`);
+          process.exitCode = 1;
+          return;
+        }
+        failures += 1;
+        log.error(`tick failed (${failures} in a row): ${err?.message ?? err}`);
+        if (failures === ALARM_AFTER_FAILURES) {
+          log.error(`${failures} consecutive failures — check credentials and network before restarting`);
+        }
+      }
+      if (once || stopping) return;
+      if (eventWake) continue;
+      await new Promise((resolve) => {
+        const timer = setTimeout(done, config.pollIntervalSec * 1000);
+        function done() { clearTimeout(timer); wake = undefined; resolve(); }
+        wake = done;
+      });
+    }
+  } finally {
+    process.off('SIGINT', stop);
+    process.off('SIGTERM', stop);
+    listener?.stop();
+    if (listener) await listener.done.catch(() => {});
   }
 }
 

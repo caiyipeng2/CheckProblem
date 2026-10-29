@@ -38,8 +38,25 @@ export function resolveApiKey({
   return stripped === '' ? undefined : stripped;
 }
 
+// Screenshots travel as OpenAI-style content parts. A file that cannot be read
+// must fail this attempt before any request is sent: a half-filled multimedia
+// request only produces a confusing gateway error.
+function imageParts(images) {
+  return (Array.isArray(images) ? images : []).map((image) => {
+    let data;
+    try {
+      data = readFileSync(image.path);
+    } catch (err) {
+      throw new Error(`截图无法读取：${image.path}（${err?.message ?? err}）`);
+    }
+    const mime = typeof image.mime === 'string' && image.mime !== '' ? image.mime : 'image/png';
+    return { type: 'image_url', image_url: { url: `data:${mime};base64,${data.toString('base64')}` } };
+  });
+}
+
 export async function askChat({
   prompt,
+  images = [],
   baseUrl,
   model,
   apiKey,
@@ -51,6 +68,9 @@ export async function askChat({
   if (!apiKey) throw new Error(`chat 引擎缺少 API Key（模型 ${model}）`);
   if (typeof fetchImpl !== 'function') throw new Error('当前 Node 没有可用的 fetch');
 
+  const parts = imageParts(images);
+  const messageContent = parts.length ? [{ type: 'text', text: prompt }, ...parts] : prompt;
+
   const url = `${String(baseUrl).replace(/\/+$/, '')}/chat/completions`;
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -61,7 +81,7 @@ export async function askChat({
       headers: { 'content-type': 'application/json', authorization: `Bearer ${apiKey}` },
       body: JSON.stringify({
         model,
-        messages: [{ role: 'user', content: prompt }],
+        messages: [{ role: 'user', content: messageContent }],
         temperature: 0.2,
         stream: false,
       }),

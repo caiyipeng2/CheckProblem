@@ -10,10 +10,12 @@
 
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { extractPlainText, hasTrigger, classifyConfirmation, isUnseen } from './trigger.js';
+import { extractPlainText, extractImageKeys, hasTrigger, classifyConfirmation, isUnseen } from './trigger.js';
 import { markSeen } from './state.js';
 import { buildPrompt } from './analyze.js';
 import { CONFIRM_PROMPT, TIMEOUT_NOTICE, CANCELLED_NOTICE, BUSY_NOTICE, clipForReply } from './reply.js';
+import { createCardRequests } from './card-requests.js';
+import { clearImages, collectImages, imageDirFor, uniqueRefs } from './images.js';
 
 // Enough for a busy chat plus the context window. The brief's
 // max(20, contextMessages + 5) was replaced by a fixed page: context never
@@ -38,7 +40,25 @@ function contextLine(msg) {
   return `${who}: ${extractPlainText(msg).trim().slice(0, CONTEXT_LINE_CHARS)}`;
 }
 
-export function createEngine({ config, lark, syncRepo, runAnalysis, state, clock, log, saveState, retrieve }) {
+export function createEngine({ config, lark, syncRepo, runAnalysis, state, clock, log, saveState, retrieve, listBranches }) {
+  const cards = config.projects ? createCardRequests({
+    config, state, lark, listBranches, clock, saveState, log, runJob,
+  }) : null;
+  const isServiceMessage = (message) => cards
+    ? message?.sender?.sender_type === 'app'
+    : senderId(message) === config.selfOpenId;
+
+  // Screenshots are captured by reference only: the bytes stay on Feishu until
+  // the operator starts the query, so a cancelled or expired card costs nothing.
+  const imageRefsOf = (message) => (isServiceMessage(message) ? [] : extractImageKeys(message)
+    .map((fileKey) => ({ messageId: message.message_id, fileKey })));
+
+  function attachImages(job, message) {
+    if (!job) return 0;
+    const before = job.images?.length ?? 0;
+    job.images = uniqueRefs([...(job.images ?? []), ...imageRefsOf(message)]);
+    return job.images.length - before;
+  }
   let inFlight = false;
   let firstTick = true;
   // Boundary of the running tick, and whether one skipped tick has already
@@ -70,24 +90,27 @@ export function createEngine({ config, lark, syncRepo, runAnalysis, state, clock
     }
   }
 
-  async function runJob(msg) {
+  async function runJob(msg, repo) {
     const job = state.job;
     const triggerMessageId = job.triggerMessageId;
-    const confirmer = await confirmerFor(msg);
-
+    const imagesDir = imageDirFor(config.paths.imagesDir, triggerMessageId);
     job.status = 'running';
+    saveState(state);
+    const confirmer = await confirmerFor(msg);
     job.confirmer = confirmer;
     saveState(state);
     log?.info?.(`confirmed by ${confirmer}, question=${job.question}`);
 
     try {
-      const { provenance } = await syncRepo();
+      if (job.card) await cards.update(job);
+      const { provenance } = await syncRepo(repo);
+      job.provenance = provenance;
       // The clone moved, so the search runs after the sync. A failed search only
       // costs precision: the model still gets the question.
       let evidence = '';
       if (typeof retrieve === 'function') {
         try {
-          const found = await retrieve(job.question);
+          const found = await retrieve(job.question, repo);
           evidence = found?.digest ?? '';
           log?.info?.(`search: ${found?.terms?.length ?? 0} terms, ${found?.files?.length ?? 0} files${found?.note ? ` (${found.note})` : ''}`);
         } catch (err) {
@@ -95,11 +118,26 @@ export function createEngine({ config, lark, syncRepo, runAnalysis, state, clock
         }
       }
 
-      const prompt = buildPrompt({ question: job.question, context: job.context, evidence });
-      const { text } = await runAnalysis(prompt);
+      const images = await collectImages({
+        refs: job.images,
+        dir: imagesDir,
+        download: lark.downloadImage,
+        log,
+      });
+      if (job.images?.length) log?.info?.(`screenshots: ${images.length}/${job.images.length} attached`);
+
+      const analysisProvenance = repo ? `${repo.name} · ${provenance}` : provenance;
+      const prompt = buildPrompt({
+        question: job.question,
+        context: job.context,
+        evidence,
+        provenance: analysisProvenance,
+        imageCount: images.length,
+      });
+      const { text } = await runAnalysis(prompt, repo, { images });
       const { text: body, truncated, full } = clipForReply({
         analysis: text,
-        provenance,
+        provenance: analysisProvenance,
         confirmer,
         maxChars: config.maxReplyChars,
       });
@@ -117,11 +155,14 @@ export function createEngine({ config, lark, syncRepo, runAnalysis, state, clock
         }
       }
       log?.info?.(`analysis for ${triggerMessageId} delivered at ${provenance}`);
+      await cards?.finish(job, 'completed');
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       log?.error?.(`analysis failed for ${triggerMessageId}: ${message}`);
+      await cards?.finish(job, 'failed');
       await lark.reply(triggerMessageId, `分析失败：${message.slice(0, 200)}`);
     } finally {
+      clearImages(imagesDir);
       state.job = null;
       saveState(state);
     }
@@ -149,23 +190,32 @@ export function createEngine({ config, lark, syncRepo, runAnalysis, state, clock
       // mid-analysis: the result is unrecoverable, so say so once and move on.
       if (firstTick) {
         if (state.job?.status === 'running') {
-          const { triggerMessageId } = state.job;
+          const job = state.job;
+          const { triggerMessageId } = job;
           log?.warn?.(`recovering interrupted analysis of ${triggerMessageId}`);
-          state.job = null;
-          saveState(state);
+          if (job.card && cards) await cards.finish(job, 'interrupted');
+          else {
+            state.job = null;
+            saveState(state);
+          }
           await notice(triggerMessageId, INTERRUPTED_NOTICE);
         }
         firstTick = false;
       }
 
       if (state.job?.status === 'awaiting' && now > state.job.expiresAt) {
-        const { triggerMessageId } = state.job;
+        const job = state.job;
+        const { triggerMessageId } = job;
         log?.info?.(`confirmation for ${triggerMessageId} timed out`);
-        state.job = null;
-        saveState(state);
+        if (job.card && cards) await cards.finish(job, 'expired');
+        else {
+          state.job = null;
+          saveState(state);
+        }
         await notice(triggerMessageId, TIMEOUT_NOTICE);
       }
 
+      await cards?.processPending();
       const messages = await lark.listMessages(config.chatId, { pageSize: PAGE_SIZE });
       const batch = Array.isArray(messages) ? messages : [];
       const unseen = batch.filter((m) => isUnseen(state.lastSeen, m));
@@ -173,7 +223,13 @@ export function createEngine({ config, lark, syncRepo, runAnalysis, state, clock
       if (state.job?.status === 'awaiting') {
         let busyNotified = false;
         for (const message of unseen) {
-          const kind = classifyConfirmation(extractPlainText(message).trim());
+          // A screenshot that answers the pending question is still useful after
+          // the trigger, so it joins the job until the operator starts it.
+          if (attachImages(state.job, message) > 0) {
+            if (state.job.card) state.job.cardNeedsUpdate = true;
+            saveState(state);
+          }
+          const kind = state.job.card ? null : classifyConfirmation(extractPlainText(message).trim());
           if (kind === 'confirm') {
             log?.info?.(`confirmation from ${senderId(message)} for ${state.job.triggerMessageId}`);
             await runJob(message);
@@ -194,7 +250,7 @@ export function createEngine({ config, lark, syncRepo, runAnalysis, state, clock
           // one notice per tick is enough; ordinary chatter stays ignored.
           if (
             !busyNotified &&
-            senderId(message) !== config.selfOpenId &&
+            !isServiceMessage(message) &&
             hasTrigger(message, config.triggerKeyword)
           ) {
             busyNotified = true;
@@ -213,25 +269,29 @@ export function createEngine({ config, lark, syncRepo, runAnalysis, state, clock
       }
 
       for (const message of unseen) {
-        if (senderId(message) === config.selfOpenId) continue;
+        if (isServiceMessage(message)) continue;
         if (!hasTrigger(message, config.triggerKeyword)) continue;
 
         const index = batch.indexOf(message);
-        const context = batch
-          .slice(Math.max(0, index - config.contextMessages), index)
-          .map(contextLine);
+        const contextMessages = batch.slice(Math.max(0, index - config.contextMessages), index);
+        const context = contextMessages.map(contextLine);
+        const images = uniqueRefs([...contextMessages, message].flatMap(imageRefsOf));
         const question = extractPlainText(message).trim();
-        const prompt = await lark.reply(message.message_id, CONFIRM_PROMPT);
-
-        state.job = {
-          status: 'awaiting',
-          triggerMessageId: message.message_id,
-          question,
-          context,
-          promptMessageId: prompt?.messageId ?? '',
-          expiresAt: clock() + config.confirmTimeoutSec * 1000,
-          confirmer: null,
-        };
+        if (cards) {
+          state.job = await cards.create({ triggerMessageId: message.message_id, question, context, images });
+        } else {
+          const prompt = await lark.reply(message.message_id, CONFIRM_PROMPT);
+          state.job = {
+            status: 'awaiting',
+            triggerMessageId: message.message_id,
+            question,
+            context,
+            images,
+            promptMessageId: prompt?.messageId ?? '',
+            expiresAt: clock() + config.confirmTimeoutSec * 1000,
+            confirmer: null,
+          };
+        }
         markSeen(state, message);
         saveState(state);
         log?.info?.(`awaiting confirmation for ${message.message_id}`);
@@ -248,5 +308,5 @@ export function createEngine({ config, lark, syncRepo, runAnalysis, state, clock
     }
   }
 
-  return { tick };
+  return { tick, enqueueCardAction: (event) => cards?.enqueue(event) ?? false };
 }

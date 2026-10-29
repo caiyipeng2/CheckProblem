@@ -106,3 +106,55 @@ test('resolveApiKey prefers the environment and falls back to a file', async () 
     undefined,
   );
 });
+
+test('askChat sends screenshots as image parts after the prompt', async (t) => {
+  const { mkdtempSync, rmSync, writeFileSync } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const dir = mkdtempSync(join(tmpdir(), 'chat-img-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const bytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3]);
+  const path = join(dir, 'image-1.png');
+  writeFileSync(path, bytes);
+
+  let seen;
+  const fetchImpl = async (url, init) => {
+    seen = { url, init };
+    return reply('【结论】配置缺失');
+  };
+
+  await askChat({
+    prompt: '看截图',
+    images: [{ path, mime: 'image/png' }],
+    baseUrl: 'https://x',
+    model: 'deepseek-flash',
+    apiKey: 'sk-test',
+    fetchImpl,
+  });
+
+  const content = JSON.parse(seen.init.body).messages[0].content;
+  assert.deepEqual(content, [
+    { type: 'text', text: '看截图' },
+    { type: 'image_url', image_url: { url: `data:image/png;base64,${bytes.toString('base64')}` } },
+  ]);
+});
+
+test('askChat reports an unreadable screenshot instead of sending a broken request', async () => {
+  let called = 0;
+  await assert.rejects(
+    () =>
+      askChat({
+        prompt: 'p',
+        images: [{ path: 'C:/definitely/missing.png', mime: 'image/png' }],
+        baseUrl: 'https://x',
+        model: 'm',
+        apiKey: 'k',
+        fetchImpl: async () => {
+          called += 1;
+          return reply('x');
+        },
+      }),
+    /截图/,
+  );
+  assert.equal(called, 0);
+});

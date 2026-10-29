@@ -135,6 +135,16 @@ test('reply posts a text body JSON string on stdin and returns the new message i
   assert.equal(typeof body.content, 'string');
 });
 
+test('botReplies sends service text as the bot while message reads remain user-scoped', async () => {
+  const { calls, run } = capture(() => envelope({ message_id: 'om_bot_reply', items: [] }));
+  const lark = createLark({ run, botReplies: true });
+  assert.deepEqual(await lark.reply('om_question', '蔡龙自动分析'), { messageId: 'om_bot_reply' });
+  await lark.listMessages('oc_x');
+  assert.equal(flag(calls[0].args, '--as'), 'bot');
+  assert.equal(flag(calls[1].args, '--as'), 'user');
+  assert.deepEqual(JSON.parse(calls[0].opts.stdin), { content: '{"text":"蔡龙自动分析"}', msg_type: 'text' });
+});
+
 test('reply is suppressed under dryRun, logs the text, and never calls run', async () => {
   const seen = [];
   const log = { info: (m) => seen.push(m), warn: () => {} };
@@ -281,4 +291,107 @@ test('getSenderName returns an empty string for an unsafe open id', async () => 
   assert.equal(await lark.getSenderName('bad id'), '');
   assert.equal(calls.length, 0);
   assert.equal(warnings.length, 1);
+});
+
+const CARD = { elements: [{ tag: 'markdown', content: '确认 & %SECRET% "按钮"' }] };
+
+for (const [method, id, verb, path, extra] of [
+  ['replyCard', 'om_1', 'POST', '/open-apis/im/v1/messages/om_1/reply', { msg_type: 'interactive' }],
+  ['updateCard', 'om_1', 'PATCH', '/open-apis/im/v1/messages/om_1', {}],
+  ['sendCard', 'oc_x', 'POST', '/open-apis/im/v1/messages', { receive_id: 'oc_x', msg_type: 'interactive' }],
+]) {
+  test(`${method} writes interactive content through stdin with bot identity only`, async () => {
+    const { calls, run } = capture(() => envelope({ message_id: 'om_card' }));
+    const result = await createLark({ run })[method](id, CARD);
+    if (method !== 'updateCard') assert.deepEqual(result, { messageId: 'om_card' });
+    assert.equal(calls.length, 1);
+    const { cmd, args, opts } = calls[0];
+    assert.equal(cmd, 'lark-cli');
+    assert.deepEqual(args.slice(0, 3), ['api', verb, path]);
+    assert.deepEqual(args.slice(-3), ['--as', 'bot', '--json']);
+    assert.equal(args.includes('user'), false);
+    assert.equal(flag(args, '--data'), '-');
+    assert.deepEqual(JSON.parse(opts.stdin), { ...extra, content: JSON.stringify(CARD) });
+    assert.equal(args.some((arg) => arg.includes('SECRET') || arg.includes('确认')), false);
+    if (method === 'sendCard') {
+      assert.deepEqual(jsonFlag(args, '--params'), { receive_id_type: 'chat_id' });
+    }
+  });
+
+  test(`${method} honors dryRun without logging card contents`, async () => {
+    const logs = [];
+    const { calls, run } = capture(() => envelope({}));
+    const result = await createLark({ run, dryRun: true, log: { info: (m) => logs.push(m) } })[method](id, CARD);
+    if (method !== 'updateCard') assert.deepEqual(result, { messageId: 'dry-run' });
+    assert.equal(calls.length, 0);
+    assert.equal(logs.some((m) => m.includes('SECRET')), false);
+  });
+
+  test(`${method} validates ids and UTF-8 serialized size even in dryRun`, async () => {
+    for (const dryRun of [false, true]) {
+      const { calls, run } = capture(() => envelope({}));
+      const lark = createLark({ run, dryRun });
+      for (const bad of ['', 'om_x&whoami', '../om_x', null]) {
+        await assert.rejects(() => lark[method](bad, CARD), LarkError);
+      }
+      await assert.rejects(() => lark[method](id, { text: '中'.repeat(10240) }), /30\s*Ki?B|30\s*KB/i);
+      const circular = {}; circular.self = circular;
+      await assert.rejects(() => lark[method](id, circular), LarkError);
+      await assert.rejects(() => lark[method](id, undefined), LarkError);
+      assert.equal(calls.length, 0);
+    }
+  });
+
+  test(`${method} accepts exactly 30 KiB of serialized content`, async () => {
+    const { calls, run } = capture(() => envelope({}));
+    // {"text":""} is 11 bytes; Chinese characters are three bytes each.
+    await createLark({ run })[method](id, { text: '中'.repeat(10236) + 'x' });
+    assert.equal(Buffer.byteLength(JSON.parse(calls[0].opts.stdin).content), 30720);
+  });
+
+  test(`${method} surfaces CLI failures`, async () => {
+    const lark = createLark({ run: async () => failure({ message: 'denied', code: 403 }) });
+    await assert.rejects(() => lark[method](id, CARD), (err) => err instanceof LarkError && err.code === 403);
+  });
+}
+
+test('downloadImage saves a message image through the download shortcut', async () => {
+  const { calls, run } = capture(() => envelope({ saved_path: 'C:/tmp/x.png', size_bytes: 1234 }));
+  const lark = createLark({ run });
+
+  const res = await lark.downloadImage({
+    messageId: 'om_1',
+    fileKey: 'img_v3_02abc_DEF',
+    outputPath: 'C:/tmp/checkproblem/job/image-1',
+  });
+
+  assert.deepEqual(res, { path: 'C:/tmp/x.png', size: 1234 });
+  assert.equal(calls.length, 1);
+  const { cmd, args, opts } = calls[0];
+  assert.equal(cmd, 'lark-cli');
+  assert.deepEqual(args.slice(0, 2), ['im', '+messages-resources-download']);
+  assert.equal(flag(args, '--message-id'), 'om_1');
+  assert.equal(flag(args, '--file-key'), 'img_v3_02abc_DEF');
+  assert.equal(flag(args, '--type'), 'image');
+  assert.equal(flag(args, '--output'), 'C:/tmp/checkproblem/job/image-1');
+  assert.equal(flag(args, '--as'), 'user');
+  assert.ok(args.includes('--json'));
+  assert.deepEqual(opts, {});
+});
+
+test('downloadImage is suppressed under dryRun and refuses unsafe ids', async () => {
+  const { calls, run } = capture(() => envelope({ saved_path: 'C:/tmp/x.png' }));
+  const dry = createLark({ run, dryRun: true, log: { info() {}, warn() {} } });
+  assert.deepEqual(await dry.downloadImage({ messageId: 'om_1', fileKey: 'img_a', outputPath: 'p' }), { path: '' });
+  assert.equal(calls.length, 0);
+
+  const lark = createLark({ run });
+  for (const bad of [
+    { messageId: 'om_1; rm -rf /', fileKey: 'img_a', outputPath: 'p' },
+    { messageId: 'om_1', fileKey: 'img_a && whoami', outputPath: 'p' },
+    { messageId: 'om_1', fileKey: 'img_a', outputPath: '' },
+  ]) {
+    await assert.rejects(() => lark.downloadImage(bad), LarkError);
+  }
+  assert.equal(calls.length, 0);
 });

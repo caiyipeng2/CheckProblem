@@ -21,7 +21,11 @@ export function extractPlainText(msg) {
   if (!data || typeof data !== 'object') return '';
   if (msg.msg_type === 'text') return typeof data.text === 'string' ? data.text : '';
   if (msg.msg_type === 'post') {
-    const blocks = Object.values(data).flatMap((locale) => locale?.content ?? []);
+    // The message API returns `{title, content}`; webhook-era fixtures wrap the
+    // same payload per locale (`{zh_cn: {title, content}}`).
+    const blocks = Array.isArray(data.content)
+      ? data.content
+      : Object.values(data).flatMap((locale) => locale?.content ?? []);
     return blocks
       .flat()
       .filter((node) => node?.tag === 'text' || node?.tag === 'md')
@@ -31,16 +35,54 @@ export function extractPlainText(msg) {
   return '';
 }
 
+// Real resource keys look like `img_v3_02abc...`; anything else is not a key we
+// are willing to hand to lark-cli (and to the shell, on Windows).
+const IMAGE_KEY = /^img_[A-Za-z0-9_-]{1,200}$/;
+
+function collectImageKeys(node, out) {
+  if (!node || typeof node !== 'object') return;
+  if (node.tag === 'img' && typeof node.image_key === 'string' && IMAGE_KEY.test(node.image_key)) {
+    out.push(node.image_key);
+  }
+  for (const value of Object.values(node)) {
+    if (Array.isArray(value)) {
+      for (const item of value) collectImageKeys(item, out);
+    } else if (value && typeof value === 'object') {
+      collectImageKeys(value, out);
+    }
+  }
+}
+
+// Screenshots are the only attachment the analysis can read. An image message
+// carries one key; a rich-text post can carry several, nested in its paragraphs.
+export function extractImageKeys(msg) {
+  if (msg?.msg_type === 'image') {
+    const key = parseBody(msg)?.image_key;
+    return typeof key === 'string' && IMAGE_KEY.test(key) ? [key] : [];
+  }
+  if (msg?.msg_type === 'post') {
+    const data = parseBody(msg);
+    if (!data || typeof data !== 'object') return [];
+    const keys = [];
+    collectImageKeys(data, keys);
+    return [...new Set(keys)];
+  }
+  return [];
+}
+
 export function isTrigger(text, keyword) {
-  if (!text || !keyword) return false;
-  return text.includes(keyword);
+  if (!text) return false;
+  return Boolean(keyword && text.includes(keyword))
+    || /\buid\s*[:：]\s*\d+(?![\w.])/i.test(text)
+    || text.includes('玩家反馈')
+    || text.includes('麻烦有时间看看');
 }
 
 // Where the user @-mentions someone, the text body holds a placeholder such as
 // `@_user_1` and the real name lives in `mentions[]`. Either source triggers.
 export function hasTrigger(msg, keyword) {
-  if (!keyword) return false;
   if (isTrigger(extractPlainText(msg), keyword)) return true;
+  if (!keyword) return false;
   const mentions = Array.isArray(msg?.mentions) ? msg.mentions : [];
   return mentions.some(
     (mention) => typeof mention?.name === 'string' && mention.name.includes(keyword),

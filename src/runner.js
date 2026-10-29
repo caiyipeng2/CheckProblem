@@ -107,7 +107,8 @@ const messageOf = (err) => (err instanceof Error ? err.message : String(err));
 export function run(cmd, args, { stdin, timeoutMs } = {}) {
   // Quote before spawning: an unquotable argument is a programming error and
   // must surface as such rather than reach the shell.
-  const quoted = [cmd, ...args].map(quoteArg);
+  const useShell = cmd !== 'git';
+  const quoted = useShell ? [cmd, ...args].map(quoteArg) : [cmd, ...args];
 
   // A missing or nonsensical budget falls back to the default rather than
   // meaning "no timeout": unbounded is never a safe option here.
@@ -117,7 +118,7 @@ export function run(cmd, args, { stdin, timeoutMs } = {}) {
     let child;
     try {
       child = spawn(quoted[0], quoted.slice(1), {
-        shell: true,
+        shell: useShell,
         windowsHide: true,
         stdio: ['pipe', 'pipe', 'pipe'],
       });

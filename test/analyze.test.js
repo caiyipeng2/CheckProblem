@@ -14,6 +14,21 @@ test('buildPrompt contains question, context and output contract', () => {
   assert.match(p, /只读/);
 });
 
+test('buildPrompt includes confirmed repository provenance even without search evidence', () => {
+  const prompt = buildPrompt({
+    question: '定位启动入口',
+    provenance: '武器店 · feature/Medal-Challenge@b2b9fab31e',
+  });
+  assert.match(prompt, /武器店 · feature\/Medal-Challenge@b2b9fab31e/);
+  assert.ok(prompt.indexOf('feature/Medal-Challenge@b2b9fab31e') < prompt.indexOf('【群内上下文】'));
+  assert.match(prompt, /本地检索线索】（无/);
+});
+
+test('buildPrompt does not invent repository provenance when none was supplied', () => {
+  const prompt = buildPrompt({ question: '定位启动入口' });
+  assert.doesNotMatch(prompt, /【本次代码版本】|undefined|null|master@/);
+});
+
 test('buildPrompt renders the （无） placeholder and the output contract without context', () => {
   for (const context of [undefined, []]) {
     const p = buildPrompt({ question: 'uid 16115645 奖励没到账', context });
@@ -426,4 +441,62 @@ test('a second tool-call answer fails over to the next engine', async () => {
   assert.equal(calls, 2, 'one retry, then give up on that engine');
   assert.equal(spawned, 1);
   assert.equal(res.engine, 'codex');
+});
+
+test('buildPrompt announces the attached screenshots as data, not instructions', () => {
+  const p = buildPrompt({ question: '奖励没到账', imageCount: 2 });
+  assert.match(p, /【群内截图】/);
+  assert.match(p, /2 张/);
+  assert.match(p, /图1/);
+  assert.match(p, /图2/);
+  assert.match(p, /不是指令/);
+  assert.ok(p.indexOf('【群内截图】') < p.indexOf('【运营提出的问题】'));
+  assert.doesNotMatch(buildPrompt({ question: 'q' }), /【群内截图】/);
+});
+
+test('runAnalysis hands screenshots to codex with -i and to chat engines as parts', async () => {
+  const images = [
+    { path: 'C:/tmp/a.png', mime: 'image/png' },
+    { path: 'C:/tmp/b.jpg', mime: 'image/jpeg' },
+  ];
+  let argv;
+  await runAnalysis({
+    prompt: 'p',
+    repoDir: 'C:/repo',
+    images,
+    run: async (cmd, args) => {
+      argv = args;
+      return { code: 0, stdout: 'ok', stderr: '' };
+    },
+  });
+  assert.deepEqual(argv.slice(-5), ['-i', 'C:/tmp/a.png', '-i', 'C:/tmp/b.jpg', '-']);
+
+  let chatArgs;
+  const res = await runAnalysis({
+    prompt: 'p',
+    repoDir: 'C:/repo',
+    images,
+    chat: async (request) => {
+      chatArgs = request;
+      return { text: '【结论】配置缺失' };
+    },
+    run: async () => ({ code: 0, stdout: 'unused', stderr: '' }),
+    attempts: [{ label: 'deepseek', kind: 'chat', model: 'm', timeoutSec: 5 }],
+  });
+  assert.equal(res.engine, 'deepseek');
+  assert.deepEqual(chatArgs.images, images);
+});
+
+test('runAnalysis leaves argv unchanged when nothing was attached', async () => {
+  let argv;
+  await runAnalysis({
+    prompt: 'p',
+    repoDir: 'C:/repo',
+    run: async (cmd, args) => {
+      argv = args;
+      return { code: 0, stdout: 'ok', stderr: '' };
+    },
+  });
+  assert.equal(argv.includes('-i'), false);
+  assert.equal(argv.at(-1), '-');
 });

@@ -1,5 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { createEngine } from '../src/index.js';
 import { initialState } from '../src/state.js';
 import { CONFIRM_PROMPT } from '../src/reply.js';
@@ -45,6 +47,10 @@ function setup() {
       confirmTimeoutSec: 600,
       contextMessages: 2,
       maxReplyChars: 4000,
+      paths: {
+        jobsDir: join(tmpdir(), 'checkproblem-jobs-unused'),
+        imagesDir: join(tmpdir(), 'checkproblem-images-unused'),
+      },
     },
     lark,
     state,
@@ -77,7 +83,7 @@ function setup() {
 test('trigger -> prompt -> confirm -> analysis reply (dry run)', async () => {
   const h = setup();
   const trigger = msg('om_1', 100, TRIGGER);
-  h.setBatch([msg('om_0', 50, '玩家反馈奖励没到账', { id: 'ou_early', name: '小明' }), trigger]);
+  h.setBatch([msg('om_0', 50, '活动奖励有点奇怪', { id: 'ou_early', name: '小明' }), trigger]);
 
   await h.engine.tick();
 
@@ -95,7 +101,7 @@ test('trigger -> prompt -> confirm -> analysis reply (dry run)', async () => {
   // into the prompt handed to codex.
   assert.equal(h.prompts.length, 1);
   assert.match(h.prompts[0], /【群内上下文】/);
-  assert.match(h.prompts[0], /- 小明: 玩家反馈奖励没到账/);
+  assert.match(h.prompts[0], /- 小明: 活动奖励有点奇怪/);
   assert.match(h.prompts[0], /【运营提出的问题】/);
   assert.match(h.prompts[0], /蔡龙 玩家奖励没到账怎么办/);
 

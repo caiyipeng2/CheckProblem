@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createEngine } from '../src/index.js';
@@ -54,7 +54,10 @@ function harness(overrides = {}) {
     contextMessages: 2,
     maxReplyChars: 4000,
     // never touched: every fixture analysis fits under maxReplyChars.
-    paths: { jobsDir: join(tmpdir(), 'checkproblem-jobs-unused') },
+    paths: {
+      jobsDir: join(tmpdir(), 'checkproblem-jobs-unused'),
+      imagesDir: join(tmpdir(), 'checkproblem-images-unused'),
+    },
   };
 
   const lark = {
@@ -109,6 +112,20 @@ function harness(overrides = {}) {
     },
   };
 }
+
+test('legacy analysis prompt uses synchronized provenance rather than a configured branch', async () => {
+  const h = harness({
+    syncRepo: async () => ({ branch: 'feature/启动', commit: 'abc9876', dirty: 2, provenance: 'feature/启动@abc9876+2' }),
+  });
+  h.config.repo = { branch: 'master' };
+  h.state.job = awaitingJob();
+  h.setBatch([msg('om_2', NOW + 100, '确认')]);
+  await h.engine.tick();
+  assert.equal(h.calls.prompts.length, 1);
+  assert.match(h.calls.prompts[0], /feature\/启动@abc9876\+2/);
+  assert.doesNotMatch(h.calls.prompts[0], /master@|最新远端/);
+  assert.match(h.replies.at(-1).text, /feature\/启动@abc9876\+2/);
+});
 
 test('a trigger spawns the confirmation prompt and an awaiting job', async () => {
   const h = harness();
@@ -190,7 +207,7 @@ test('a clipped reply keeps the footer and the archive holds the full text', asy
   const jobsDir = mkdtempSync(join(tmpdir(), 'checkproblem-jobs-'));
   const h = harness();
   h.config.maxReplyChars = 50;
-  h.config.paths = { jobsDir };
+  h.config.paths = { jobsDir, imagesDir: join(jobsDir, 'images-unused') };
   h.state.job = awaitingJob();
   h.state.lastSeen = { createTimeMs: NOW, messageId: 'om_1' };
   h.setBatch([msg('om_2', NOW + 100, '确认', 'ou_ops')]);
@@ -336,14 +353,14 @@ test('context lines from preceding messages reach the prompt', async () => {
   h.state.lastSeen = { createTimeMs: 0, messageId: '' };
   const batch = [
     msg('om_0', 100, '今天的活动出问题了', 'ou_early'),
-    msg('om_1', 110, '玩家反馈奖励没到账', { id: 'ou_1', name: '小明' }),
+    msg('om_1', 110, '活动奖励有点奇怪', { id: 'ou_1', name: '小明' }),
     msg('om_2', 120, '已经收到三例', 'ou_2'),
     msg('om_3', 130, '蔡龙 帮看一下', 'ou_3'),
   ];
   h.setBatch(batch);
 
   await h.engine.tick();
-  assert.deepEqual(h.state.job.context, ['小明: 玩家反馈奖励没到账', 'ou_2: 已经收到三例']);
+  assert.deepEqual(h.state.job.context, ['小明: 活动奖励有点奇怪', 'ou_2: 已经收到三例']);
 
   h.setNow(NOW + 1000);
   h.setBatch([...batch, msg('om_4', NOW + 1000, '确认', 'ou_ops')]);
@@ -351,7 +368,7 @@ test('context lines from preceding messages reach the prompt', async () => {
 
   assert.equal(h.calls.prompts.length, 1);
   const prompt = h.calls.prompts[0];
-  assert.match(prompt, /- 小明: 玩家反馈奖励没到账/);
+  assert.match(prompt, /- 小明: 活动奖励有点奇怪/);
   assert.match(prompt, /- ou_2: 已经收到三例/);
   assert.doesNotMatch(prompt, /今天的活动出问题了/, 'context is capped at contextMessages');
   assert.match(prompt, /蔡龙 帮看一下/);
@@ -574,4 +591,45 @@ test('a failing search does not cost the analysis', async () => {
   assert.match(h.calls.prompts[0], /本地检索线索】（无/);
   assert.ok(h.logs.warn.some((line) => /search failed: git exploded/.test(line)));
   assert.equal(h.state.job, null);
+});
+
+test('a screenshot posted before 确认 reaches the legacy analysis and is cleaned up', async (t) => {
+  const root = mkdtempSync(join(tmpdir(), 'cp-legacy-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  let seen;
+  const h = harness({
+    runAnalysis: async (prompt, repo, options) => {
+      seen = { prompt, options };
+      return { text: ANALYSIS };
+    },
+  });
+  h.config.paths.imagesDir = join(root, 'images');
+  h.lark.downloadImage = async ({ outputPath }) => {
+    const path = `${outputPath}.png`;
+    writeFileSync(path, Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
+    return { path };
+  };
+
+  const trigger = msg('om_1', NOW, 'uid：16115645 奖励没到账');
+  const image = {
+    message_id: 'om_img',
+    create_time: String(NOW + 100),
+    msg_type: 'image',
+    sender: { id: 'ou_ops' },
+    content: JSON.stringify({ image_key: 'img_v3_a' }),
+  };
+  h.setBatch([trigger]);
+  await h.engine.tick();
+  h.setBatch([trigger, image]);
+  await h.engine.tick();
+
+  assert.deepEqual(h.state.job.images, [{ messageId: 'om_img', fileKey: 'img_v3_a' }]);
+
+  h.setBatch([trigger, image, msg('om_2', NOW + 200, '确认')]);
+  await h.engine.tick();
+
+  assert.equal(seen.options.images.length, 1);
+  assert.match(seen.prompt, /【群内截图】/);
+  assert.match(h.replies.at(-1).text, /配置缺失/);
+  assert.equal(existsSync(join(root, 'images', 'om_1')), false);
 });

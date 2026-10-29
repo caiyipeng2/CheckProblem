@@ -627,9 +627,6 @@ function submittedHarness(overrides = {}) {
 async function completeOneJob(h) {
   await h.engine.tick();                                // 群消息触发 -> 建卡片
   h.engine.enqueueCardAction(h.event('start'));         // 点「开始查询」
-  // Task 7 attaches the model text to the job; until then the test stands in
-  // for it so the report/ticket path does not depend on that task.
-  h.state.job.analysis = FULL_ANALYSIS;
   await h.engine.tick();                                // 跑分析 -> 查询完成 + 回填卡片
   return h.state.reports[0];
 }
@@ -758,7 +755,6 @@ test('without a workspace mapping the finished card carries no submit action', a
   const h = harness({ engine: { runAnalysis: async () => ({ text: FULL_ANALYSIS }) } });
   await h.engine.tick();
   h.engine.enqueueCardAction(h.event('start'));
-  h.state.job.analysis = FULL_ANALYSIS;
   await h.engine.tick();
   assert.equal(h.state.reports.length, 1, 'the report is still remembered');
   assert.ok(!JSON.stringify(h.updates.at(-1)).includes('"action":"tapd"'));
@@ -771,4 +767,37 @@ test('only the newest twenty completed reports are kept', async () => {
   assert.equal(h.state.reports.length, 20);
   assert.equal(h.state.reports.at(-1).question, '蔡龙 查询奖励逻辑');
   assert.ok(!h.state.reports.some((item) => item.requestId === 'old0'));
+});
+
+test('the running job keeps the raw analysis so the ticket can reuse it', async () => {
+  const seen = [];
+  const h = submittedHarness({
+    tapdClient: { createBug: async (payload) => { seen.push(payload); return { bugId: '9', url: 'https://www.tapd.cn/tapd_fe/59180547/bug/detail/9' }; } },
+  });
+  const report = await completeOneJob(h);
+  assert.equal(report.analysis.includes('【复现】'), true);
+  assert.equal(h.replies.at(-1).text.includes('【复现】'), true, 'the group still sees the same answer');
+
+  h.engine.enqueueCardAction({
+    type: 'card.action.trigger', event_id: 'evt-tapd-9', chat_id: 'oc_test',
+    message_id: report.promptMessageId, operator_id: 'ou_member', action_tag: 'button',
+    action_value: JSON.stringify({ action: 'tapd', requestId: report.requestId, revision: report.revision }),
+  });
+  await h.engine.tick();
+  assert.equal(seen.length, 1);
+  assert.match(seen[0].description, /【操作步骤】\n1\. 打开铁匠铺 2\. 点击锻造\n/);
+});
+
+test('no TAPD client means no submit path at all', async () => {
+  const h = harness({ tapdConfig: TAPD_CONFIG, engine: { runAnalysis: async () => ({ text: FULL_ANALYSIS }) } });
+  await h.engine.tick();
+  h.engine.enqueueCardAction(h.event('start'));
+  await h.engine.tick();
+  const report = h.state.reports[0];
+  const press = {
+    type: 'card.action.trigger', event_id: 'evt-off', chat_id: 'oc_test',
+    message_id: report.promptMessageId, operator_id: 'ou_member', action_tag: 'button',
+    action_value: JSON.stringify({ action: 'tapd', requestId: report.requestId, revision: report.revision }),
+  };
+  assert.equal(h.engine.enqueueCardAction(press), false);
 });

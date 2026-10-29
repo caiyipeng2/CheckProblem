@@ -20,6 +20,7 @@ import { clearImages } from '../src/images.js';
 import { acquireLock, releaseLock } from '../src/lock.js';
 import { listRemoteBranches, selectProject, syncSelectedProject } from '../src/projects.js';
 import { startCardEvents } from '../src/card-events.js';
+import { createTapdClient } from '../src/tapd.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const args = process.argv.slice(2);
@@ -60,6 +61,12 @@ clearImages(config.paths.imagesDir);
 const state = loadState(config.paths.stateFile, Date.now());
 
 const lark = createLark({ run, dryRun: config.dryRun, log, botReplies: Boolean(config.projects) });
+// TAPD is opt-in: a config without a `tapd` section leaves the client null and
+// the finished card exactly as it was before this feature.
+const tapd = config.tapd && Object.keys(config.tapd.workspaces).length
+  ? createTapdClient({ tokenFile: config.tapd.tokenFile, baseUrl: config.tapd.baseUrl, log })
+  : null;
+if (tapd) log.info(`tapd enabled for ${Object.keys(config.tapd.workspaces).join(', ')}`);
 const selectedRepo = (selection) => config.projects
   ? selectProject(config, selection?.id, selection?.branch)
   : config.repo;
@@ -94,6 +101,7 @@ const engine = createEngine({
           timeoutMs: attempt.timeoutSec * 1000,
         }),
     }),
+  tapd,
 });
 
 const ALARM_AFTER_FAILURES = 5;

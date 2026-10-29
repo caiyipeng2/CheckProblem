@@ -135,6 +135,10 @@ export function createEngine({ config, lark, syncRepo, runAnalysis, state, clock
         imageCount: images.length,
       });
       const { text } = await runAnalysis(prompt, repo, { images });
+      // The finished report is rendered from this text, so it has to be the
+      // model's own answer, not the reply clipped to `maxReplyChars`.
+      job.analysis = text;
+      saveState(state);
       const { text: body, truncated, full } = clipForReply({
         analysis: text,
         provenance: analysisProvenance,

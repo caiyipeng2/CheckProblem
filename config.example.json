@@ -1,0 +1,41 @@
+{
+  "chatId": "oc_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+  "selfOpenId": "ou_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+  "triggerKeyword": "蔡龙",
+  "confirmTimeoutSec": 600,
+  "pollIntervalSec": 15,
+  "contextMessages": 5,
+  "maxReplyChars": 4000,
+  "defaultProjectId": "weapon",
+  "projects": [
+    {
+      "id": "weapon",
+      "name": "武器店",
+      "url": "https://example.com/game/weapon.git",
+      "branch": "master"
+    },
+    {
+      "id": "digit",
+      "name": "数字门",
+      "url": "https://example.com/game/digit.git",
+      "branch": "develop"
+    }
+  ],
+  "tapd": {
+    "tokenFile": "C:/Users/<你>/.checkproblem/tapd.token",
+    "fields": {
+      "versionReport": "每周迭代版本",
+      "os": "线上安卓",
+      "te": "蔡逸鹏;",
+      "currentOwner": "小鱼;",
+      "cc": "南柯;",
+      "severity": "normal",
+      "priority": "medium",
+      "frequency": "必现"
+    },
+    "workspaces": {
+      "weapon": { "workspaceId": "59180547" },
+      "digit": { "workspaceId": "52360842", "fields": { "versionReport": "版本1" } }
+    }
+  }
+}

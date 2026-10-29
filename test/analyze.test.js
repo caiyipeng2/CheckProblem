@@ -394,8 +394,10 @@ test('looksLikeToolCall spots the junk a small model sometimes emits', async () 
 
 test('a chat answer that is really a tool call is retried once', async () => {
   let calls = 0;
-  const chat = async () => {
+  const prompts = [];
+  const chat = async ({ prompt }) => {
     calls += 1;
+    prompts.push(prompt);
     if (calls === 1) return { text: '<|DSML| invoke name="bash"><|DSML| parameter name="command">ls' };
     return { text: '【结论】代码缺陷：走错分支\n【定位】A.cs:12' };
   };
@@ -413,6 +415,13 @@ test('a chat answer that is really a tool call is retried once', async () => {
   assert.equal(calls, 2);
   assert.match(res.text, /【结论】代码缺陷/);
   assert.equal(warnings.length, 1);
+  // The retry suffix restates the section count, so it must have moved to 五段
+  // with the contract: otherwise every retry tells the model to drop 【复现】,
+  // and the TAPD ticket's 操作步骤 comes from that section.
+  assert.equal(prompts[0], 'p', 'the first attempt gets the prompt untouched');
+  assert.match(prompts[1], /^p\n\n【再次强调】/, 'the retry appends the reminder to the same prompt');
+  assert.match(prompts[1], /只输出上面要求的五段中文纯文本/);
+  assert.doesNotMatch(prompts[1], /四段/, 'the retry reminder still asks for four sections');
 });
 
 test('a second tool-call answer fails over to the next engine', async () => {
@@ -499,4 +508,18 @@ test('runAnalysis leaves argv unchanged when nothing was attached', async () => 
   });
   assert.equal(argv.includes('-i'), false);
   assert.equal(argv.at(-1), '-');
+});
+
+test('buildPrompt asks for a repro section the TAPD ticket can use', () => {
+  const p = buildPrompt({ question: 'uid 16115645 奖励没到账' });
+  assert.match(p, /必须严格使用以下五段/);
+  const at = p.indexOf('【复现】');
+  assert.ok(at > p.indexOf('【结论】') && at < p.indexOf('【定位】'), '复现 sits between 结论 and 定位');
+  assert.match(p, /【复现】玩家或策划能照做的动作，最多 2 步，每步单独一行/);
+  assert.doesNotMatch(p, /四段/, 'the prompt still announces a four-section contract');
+});
+
+test('buildPrompt still states exactly one output contract after adding 复现', () => {
+  const p = buildPrompt({ question: 'q' });
+  assert.equal(p.split('【输出格式】必须严格使用').length - 1, 1);
 });

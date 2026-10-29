@@ -9,6 +9,16 @@ const SECTIONS = { 结论: 'conclusion', 定位: 'location', 依据: 'evidence',
 const EMPTY = Object.freeze({ conclusion: '', repro: '', location: '', evidence: '', advice: '' });
 const TITLE_LIMIT = 100;
 const DESCRIPTION_LIMIT = 6000;
+// The group question is pasted into two sections (【问题描述】 and 【实际结果】), so an
+// unbounded one costs 2x its length and — because the 6000 clip can only cut the tail —
+// a long pasted log would evict 【蔡龙自动分析】 and the provenance footer from a payload
+// that still looks valid to the caller. 1200 per section is already twice what a human
+// ever sees in the group card (src/cards.js shows the first 600), so real questions are
+// never touched; it leaves the remaining ~3600 for the five section labels, the 2 repro
+// steps, the analysis block (the prompt contract caps the whole analysis at 300 字) and
+// the footer, so a well-behaved report fits without the clip firing at all.
+const QUESTION_SECTION_LIMIT = 1200;
+const CLIPPED_MARK = '（内容过长，已截断）';
 
 function appendLine(target, value) {
   if (value === '') return target;
@@ -60,34 +70,62 @@ function steps(repro) {
   return usable.map((line, index) => `${index + 1}. ${line}`);
 }
 
+// Free-form group text, bounded per section so it cannot crowd out the rest of the
+// ticket. The marker is its own line: a reader of the ticket then knows the question
+// was long rather than garbled by the cut.
+function questionSection(question) {
+  const text = String(question ?? '').trim();
+  if (text === '') return '（无）';
+  return text.length > QUESTION_SECTION_LIMIT ? `${text.slice(0, QUESTION_SECTION_LIMIT)}\n${CLIPPED_MARK}` : text;
+}
+
+// The analysis block and the provenance footer are what makes the ticket trustworthy,
+// so they are appended last and the budget is spent on the scratch text first (same
+// shape as clipForReply in src/reply.js). src/reply.js lets the reply overflow the
+// budget to keep the attribution; here the 6000 limit is hard, so if the tail alone is
+// too long the analysis text shrinks and the footer keeps the last line — cutting an
+// over-long model answer is recoverable, an anonymous ticket is not.
+function assembleDescription({ body, analysisBlock, foot }) {
+  const tail = `${analysisBlock}\n${foot}`;
+  const room = DESCRIPTION_LIMIT - tail.length - 2;
+  if (room >= 0) {
+    const head = clip(body, room);
+    return head === '' ? tail : `${head}\n\n${tail}`;
+  }
+  return `${clip(analysisBlock, Math.max(0, DESCRIPTION_LIMIT - foot.length - 1))}\n${foot}`;
+}
+
 export function buildBugPayload({ report, entry, projects = [] }) {
   const parts = parseAnalysis(report.analysis);
   const name = projects.find((project) => project.id === report.projectId)?.name ?? report.projectId;
-  const question = String(report.question ?? '').trim();
+  const question = questionSection(report.question);
   const images = Array.isArray(report.images) ? report.images : [];
-  const description = [
-    '【问题描述】', question || '（无）', '',
+  const body = [
+    '【问题描述】', question, '',
     '【操作步骤】', ...steps(parts.repro), '',
     '【预期结果】', '正常', '',
-    '【实际结果】', question || '（无）',
+    '【实际结果】', question,
     ...(images.length
       ? [`（另有 ${images.length} 张截图，见飞书群消息 ${report.triggerMessageId}，本单不附带图片）`]
       : []),
-    '',
+  ].join('\n');
+  const analysisBlock = [
     '【蔡龙自动分析】',
     `结论：${parts.conclusion || '（无）'}`,
     `定位：${parts.location || '（无）'}`,
     `依据：${parts.evidence || '（无）'}`,
     `建议：${parts.advice || '（无）'}`,
-    `—— 蔡龙自动分析 · ${report.provenance ?? ''} · 由 ${report.confirmer ?? ''} 确认`,
   ].join('\n');
+  const foot = `—— 蔡龙自动分析 · ${report.provenance ?? ''} · 由 ${report.confirmer ?? ''} 确认`;
 
   return {
     workspace_id: String(entry.workspaceId),
     // Truncation runs after the clause is taken, so a long conclusion can never
     // push the project prefix out of the title.
     title: clip(`[${name}] ${firstClause(parts.conclusion)}`, TITLE_LIMIT),
-    description: clip(description, DESCRIPTION_LIMIT),
+    // Last-resort guard only: assembleDescription already hands back something that
+    // fits, so this clip is a no-op unless a future edit breaks the budget maths.
+    description: clip(assembleDescription({ body, analysisBlock, foot }), DESCRIPTION_LIMIT),
     ...entry.fields,
   };
 }

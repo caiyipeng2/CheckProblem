@@ -96,3 +96,18 @@ test('payload description is clipped to the ticket limit', () => {
   const payload = buildBugPayload({ report: huge, entry, projects });
   assert.ok(payload.description.length <= 6000);
 });
+
+test('payload keeps the analysis and the footer when the question is a wall of text', () => {
+  const description = buildBugPayload({
+    report: { ...report, question: '问'.repeat(9000) },
+    entry,
+    projects,
+  }).description;
+  assert.ok(description.length <= 6000, 'the hard ticket limit still holds');
+  assert.match(description, /【蔡龙自动分析】\n结论：配置缺失：奖励表没有 27019278 这一档\n/);
+  assert.ok(description.includes('定位：Assets/a.cs:12'), 'the whole analysis block survives');
+  assert.ok(description.includes('依据：表里没有该档位。'), 'the whole analysis block survives');
+  assert.ok(description.includes('建议：补一行配置。'), 'the whole analysis block survives');
+  assert.match(description, /—— 蔡龙自动分析 · master@a1b2c3d · 由 蔡逸鹏 确认$/, 'attribution is never evicted');
+  assert.ok(description.includes('（内容过长，已截断）'), 'a reader can tell the question was long, not mangled');
+});

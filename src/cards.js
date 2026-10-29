@@ -31,7 +31,7 @@ export function buildBranchOptions(job) {
   return options;
 }
 
-export function buildQueryCard({ job, projects }) {
+export function buildQueryCard({ job, projects, tapd = null }) {
   const active = job.status === 'awaiting';
   const callback = (action) => [{
     type: 'callback', value: { requestId: job.requestId, revision: job.revision, action },
@@ -55,6 +55,27 @@ export function buildQueryCard({ job, projects }) {
   const note = job.note || (active
     ? `选择变更会同步给所有成员。请等卡片刷新后再开始；${Math.ceil((job.timeoutSec ?? 600) / 60)} 分钟内有效。`
     : job.status === 'running' ? '正在获取所选分支最新远端代码，请勿重复提交。' : '此请求已关闭，请通过新消息发起下一次查询。');
+  const submitted = job.tapd?.status === 'done' ? job.tapd : null;
+  const showTapd = Boolean(tapd) && job.status === 'completed' && !submitted;
+  const tapdRow = showTapd ? row([column([{
+    tag: 'button',
+    name: 'tapd',
+    text: plain(job.tapd?.status === 'submitting'
+      ? '提交中…'
+      : job.tapd?.status === 'failed' ? '重试提交 TAPD 缺陷单' : '提交 TAPD 缺陷单'),
+    type: 'default',
+    width: 'fill',
+    disabled: job.tapd?.status === 'submitting',
+    behaviors: callback('tapd'),
+  }])]) : null;
+  // A press is booked before the request goes out, so `submitting` also covers
+  // "the process died mid-request": the note tells the operator to look at TAPD
+  // rather than trust the card.
+  const tapdNote = job.tapd?.status === 'failed'
+    ? text(`TAPD 提单失败：${String(job.tapd.error).slice(0, 200)}`)
+    : job.tapd?.status === 'submitting'
+      ? text('若服务已重启，请先在 TAPD 确认是否已建单，避免重复提交。')
+      : null;
   const card = {
     schema: '2.0',
     config: { update_multi: true, enable_forward: false, width_mode: 'default', summary: { content: `蔡龙问题查询 · ${status}` } },
@@ -85,6 +106,9 @@ export function buildQueryCard({ job, projects }) {
             width: 'fill', disabled: !active, behaviors: callback('cancel'),
           }]),
         ]),
+        ...(tapdRow ? [tapdRow] : []),
+        ...(submitted ? [{ tag: 'markdown', content: `已提单：[TAPD ${submitted.bugId}](${submitted.url})` }] : []),
+        ...(tapdNote ? [tapdNote] : []),
       ],
     },
   };

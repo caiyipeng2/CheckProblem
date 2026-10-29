@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { bugUrl, buildBugPayload, parseAnalysis } from '../src/tapd.js';
+import { bugUrl, buildBugPayload, createTapdClient, parseAnalysis } from '../src/tapd.js';
 
 const ANALYSIS = [
   '【结论】配置缺失：奖励表没有 27019278 这一档',
@@ -110,4 +110,85 @@ test('payload keeps the analysis and the footer when the question is a wall of t
   assert.ok(description.includes('建议：补一行配置。'), 'the whole analysis block survives');
   assert.match(description, /—— 蔡龙自动分析 · master@a1b2c3d · 由 蔡逸鹏 确认$/, 'attribution is never evicted');
   assert.ok(description.includes('（内容过长，已截断）'), 'a reader can tell the question was long, not mangled');
+});
+
+const TOKEN = '44f57463aa5eb3adaa6c5604967696aa24e24d85';
+
+function response(body, status = 200) {
+  return { ok: status >= 200 && status < 300, status, text: async () => JSON.stringify(body) };
+}
+
+function clientWith(capture, body, status = 200) {
+  const logs = [];
+  const client = createTapdClient({
+    tokenFile: 'C:/secrets/tapd.token',
+    readFile: () => `key：${TOKEN}\n`,
+    request: async (url, init) => { capture.push({ url, init }); return response(body, status); },
+    log: { info: (m) => logs.push(m), warn: (m) => logs.push(m), error: (m) => logs.push(m) },
+  });
+  return { client, logs };
+}
+
+test('createBug posts a form body with the bearer token and returns the ticket', async () => {
+  const calls = [];
+  const { client } = clientWith(calls, { status: 1, info: 'success', data: { Bug: { id: '1159180547001002353' } } });
+  const result = await client.createBug({ workspace_id: '59180547', title: 'T', description: 'D' });
+  assert.deepEqual(result, {
+    bugId: '1159180547001002353',
+    url: 'https://www.tapd.cn/tapd_fe/59180547/bug/detail/1159180547001002353',
+  });
+  assert.equal(calls[0].url, 'https://api.tapd.cn/bugs');
+  assert.equal(calls[0].init.method, 'POST');
+  assert.equal(calls[0].init.headers.Authorization, `Bearer ${TOKEN}`);
+  assert.equal(calls[0].init.headers['Content-Type'], 'application/x-www-form-urlencoded');
+  assert.equal(calls[0].init.body, 'workspace_id=59180547&title=T&description=D');
+  assert.ok(calls[0].init.signal, 'every request carries a timeout signal');
+});
+
+test('a project-specific token file wins over the default one', async () => {
+  const calls = [];
+  const seen = [];
+  const client = createTapdClient({
+    tokenFile: 'C:/secrets/default.token',
+    readFile: (file) => { seen.push(file); return `tok-${file.length}`; },
+    request: async (url, init) => { calls.push(init.headers.Authorization); return response({ status: 1, data: { Bug: { id: '1' } } }); },
+  });
+  await client.createBug({ workspace_id: '1' }, { tokenFile: 'C:/secrets/gear.token' });
+  assert.deepEqual(seen, ['C:/secrets/gear.token']);
+  assert.match(calls[0], new RegExp(`Bearer tok-${'C:/secrets/gear.token'.length}`));
+});
+
+for (const [label, body, status, expected] of [
+  ['rejected by TAPD', { status: 0, info: '标题不能为空' }, 200, /标题不能为空/],
+  ['http error', { status: 0, info: 'bad gateway note' }, 502, /HTTP 502/],
+  ['non json body', null, 200, /HTTP 200/],
+  ['success without an id', { status: 1, info: 'success', data: [] }, 200, /未返回缺陷 ID/],
+]) {
+  test(`createBug fails loudly: ${label}`, async () => {
+    const { client, logs } = clientWith([], body ?? 'not-json', status);
+    await assert.rejects(() => client.createBug({ workspace_id: '1', title: 'T' }), expected);
+    assert.equal(logs.length, 0, 'createBug does not log on its own');
+  });
+}
+
+test('the token never appears in any error message', async () => {
+  const { client } = clientWith([], { status: 0, info: 'boom' });
+  const err = await client.createBug({ workspace_id: '1', title: 'T' }).catch((e) => e);
+  assert.ok(!String(err.message).includes(TOKEN));
+});
+
+test('an unreadable token file is refused before any request is sent', async () => {
+  const calls = [];
+  const client = createTapdClient({
+    tokenFile: 'C:/missing/tapd.token',
+    readFile: () => { throw new Error('ENOENT'); },
+    request: async (url, init) => { calls.push(url); return response({ status: 1, data: { Bug: { id: '1' } } }); },
+  });
+  await assert.rejects(() => client.createBug({ workspace_id: '1', title: 'T' }), /令牌/);
+  assert.deepEqual(calls, []);
+});
+
+test('plain http base urls are refused at construction', () => {
+  assert.throws(() => createTapdClient({ tokenFile: 'x', baseUrl: 'http://api.tapd.cn', request: async () => response({}) }), /https/);
+  assert.throws(() => createTapdClient({ tokenFile: 'x', baseUrl: 'https://evil.example.com', request: async () => response({}) }), /api\.tapd\.cn/);
 });

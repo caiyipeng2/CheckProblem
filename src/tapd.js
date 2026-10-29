@@ -4,6 +4,14 @@
 // group text goes out as an x-www-form-urlencoded body over fetch: unlike the npm
 // `.cmd` shims in src/runner.js it never meets cmd.exe, so no quoting rules apply —
 // length is the only thing that has to be bounded.
+//
+// createTapdClient below is this service's single HTTP exit to TAPD. It authenticates
+// with a personal token read from a file the operator keeps outside the repository,
+// sends only to https://api.tapd.cn, and never lets the token reach a log line or an
+// error message: a failure carries only the HTTP status and TAPD's own `info` text.
+
+import { readFileSync } from 'node:fs';
+import { resolveApiKey } from './chat.js';
 
 const SECTIONS = { 结论: 'conclusion', 定位: 'location', 依据: 'evidence', 建议: 'advice', 复现: 'repro' };
 const EMPTY = Object.freeze({ conclusion: '', repro: '', location: '', evidence: '', advice: '' });
@@ -19,6 +27,9 @@ const DESCRIPTION_LIMIT = 6000;
 // the footer, so a well-behaved report fits without the clip firing at all.
 const QUESTION_SECTION_LIMIT = 1200;
 const CLIPPED_MARK = '（内容过长，已截断）';
+const DEFAULT_BASE_URL = 'https://api.tapd.cn';
+const DEFAULT_TIMEOUT_MS = 15_000;
+const INFO_LIMIT = 160;
 
 function appendLine(target, value) {
   if (value === '') return target;
@@ -127,5 +138,57 @@ export function buildBugPayload({ report, entry, projects = [] }) {
     // fits, so this clip is a no-op unless a future edit breaks the budget maths.
     description: clip(assembleDescription({ body, analysisBlock, foot }), DESCRIPTION_LIMIT),
     ...entry.fields,
+  };
+}
+
+// One secret-file reader for the whole service: src/chat.js already strips the
+// "key：" prefix an operator tends to type, and returns undefined instead of
+// throwing so the caller decides what a missing credential means.
+export function createTapdClient({
+  tokenFile,
+  baseUrl = DEFAULT_BASE_URL,
+  request = globalThis.fetch,
+  readFile = (file) => readFileSync(file, 'utf8'),
+  log = null,
+  timeoutMs = DEFAULT_TIMEOUT_MS,
+} = {}) {
+  if (!tokenFile) throw new Error('tapd: tokenFile is required');
+  if (!/^https:\/\/api\.tapd\.cn(\/.*)?$/.test(baseUrl)) {
+    throw new Error(`tapd: baseUrl must be https://api.tapd.cn, got ${String(baseUrl).slice(0, 60)}`);
+  }
+  if (typeof request !== 'function') throw new Error('tapd: request is required');
+
+  return {
+    async createBug(payload, { tokenFile: override } = {}) {
+      const token = resolveApiKey({ apiKeyEnv: '', apiKeyFile: override ?? tokenFile, readFile });
+      if (!token) throw new Error('tapd: 令牌文件不可读或为空');
+
+      const res = await request(`${baseUrl}/bugs`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams(payload).toString(),
+        signal: AbortSignal.timeout(timeoutMs),
+      });
+      const text = await res.text();
+      let parsed = null;
+      try {
+        parsed = JSON.parse(text);
+      } catch {
+        // A non-JSON body is a failure, handled below. TAPD answers its unknown
+        // routes with an HTML login page, which lands here.
+      }
+      const bugId = parsed?.data?.Bug?.id;
+      if (parsed?.status !== 1 || !bugId) {
+        const info = typeof parsed?.info === 'string' ? clip(parsed.info, INFO_LIMIT) : '';
+        // The tail keys on the id, not on the info: TAPD answers a write that
+        // succeeded but returned no bug with the bland info "success", and a
+        // message that only repeats that would leave the operator guessing.
+        throw new Error(`tapd: 建单失败（HTTP ${res.status}${info ? ` ${info}` : ''}）${bugId ? '' : ' 未返回缺陷 ID'}`);
+      }
+      // Only the identifiers: the payload carries the whole description, which is
+      // group text and has no business in a log file.
+      log?.info?.(`tapd: bug ${bugId} created in workspace ${payload.workspace_id}`);
+      return { bugId: String(bugId), url: bugUrl(String(payload.workspace_id), String(bugId)) };
+    },
   };
 }

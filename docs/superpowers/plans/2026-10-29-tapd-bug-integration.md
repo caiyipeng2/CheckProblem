@@ -1208,6 +1208,7 @@ export function createCardRequests({ config, state, lark, listBranches, clock, s
     state.cardUpdates.push(pending);
     await retryTerminalUpdates();
   }
+```
 
 `processPending()` 整体替换为下面这版——只在循环开头多一条 `tapd` 分流，其余分支逐字照搬现状
 （`src/card-requests.js:104-139`）：

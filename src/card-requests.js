@@ -181,7 +181,14 @@ export function createCardRequests({ config, state, lark, listBranches, clock, s
       report.tapd = { status: 'done', bugId, url, at: clock() };
       log?.info?.(`tapd: ${report.triggerMessageId} -> bug ${bugId}`);
     } catch (err) {
-      report.tapd = { status: 'failed', error: String(err?.message ?? err).slice(0, 200) };
+      // Only the client's own pre-request failures carry `unsent`; anything
+      // thrown during the request may have reached TAPD and keeps the honest
+      // "outcome unknown" wording.
+      report.tapd = {
+        status: 'failed',
+        unsent: err?.unsent === true,
+        error: String(err?.message ?? err).slice(0, 200),
+      };
       log?.warn?.(`tapd submit failed for ${report.triggerMessageId}: ${report.tapd.error}`);
     }
     saveState(state);

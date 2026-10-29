@@ -729,12 +729,35 @@ test('a failed submit invites a retry on a fresh card revision', async () => {
   h.engine.enqueueCardAction(press(report.revision));
   await h.engine.tick();
   assert.equal(h.state.reports[0].tapd.status, 'failed');
+  assert.equal(h.state.reports[0].tapd.unsent, false, 'a request that went out may have landed');
   assert.match(h.state.reports[0].tapd.error, /HTTP 502/);
   const retryRevision = h.state.reports[0].revision;
   assert.ok(retryRevision > renderedRevision, 'the failed press consumed its revision');
   h.engine.enqueueCardAction(press(retryRevision));
   await h.engine.tick();
   assert.equal(attempts.length, 2);
+});
+
+test('a failure raised before the request is stored as unsent and the card says a retry is safe', async () => {
+  const h = submittedHarness({
+    tapdClient: { createBug: async () => {
+      const err = new Error('tapd: 令牌文件不可读或为空');
+      err.unsent = true;
+      throw err;
+    } },
+  });
+  const report = await completeOneJob(h);
+  h.engine.enqueueCardAction({
+    type: 'card.action.trigger', event_id: 'evt-unsent', chat_id: 'oc_test',
+    message_id: report.promptMessageId, operator_id: 'ou_member', action_tag: 'button',
+    action_value: JSON.stringify({ action: 'tapd', requestId: report.requestId, revision: report.revision }),
+  });
+  await h.engine.tick();
+  assert.equal(h.state.reports[0].tapd.status, 'failed');
+  assert.equal(h.state.reports[0].tapd.unsent, true);
+  const card = JSON.stringify(h.updates.at(-1));
+  assert.match(card, /未提交：tapd: 令牌文件不可读或为空（没有向 TAPD 发出请求，可直接重试）/);
+  assert.ok(!card.includes('提交结果可能未知'), 'nothing was sent, so nothing is unknown');
 });
 
 test('a submit left in flight after a restart is never auto-retried', async () => {

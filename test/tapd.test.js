@@ -173,7 +173,11 @@ for (const [label, body, status, expected] of [
 ]) {
   test(`createBug fails loudly: ${label}`, async () => {
     const { client, logs } = clientWith([], body, status);
-    await assert.rejects(() => client.createBug({ workspace_id: '1', title: 'T' }), expected);
+    const err = await client.createBug({ workspace_id: '1', title: 'T' }).catch((e) => e);
+    assert.match(err.message, expected);
+    // A request that went out may have landed: only a failure raised before
+    // the request may claim the ticket is provably absent.
+    assert.notEqual(err.unsent, true, `${label} is not classified as unsent`);
     assert.equal(logs.length, 0, 'createBug does not log on its own');
   });
 }
@@ -205,7 +209,22 @@ test('an unreadable token file is refused before any request is sent', async () 
     readFile: () => { throw new Error('ENOENT'); },
     request: async (url, init) => { calls.push(url); return response({ status: 1, data: { Bug: { id: '1' } } }); },
   });
-  await assert.rejects(() => client.createBug({ workspace_id: '1', title: 'T' }), /令牌/);
+  const err = await client.createBug({ workspace_id: '1', title: 'T' }).catch((e) => e);
+  assert.match(err.message, /令牌/);
+  assert.equal(err.unsent, true, 'the failure is provably before the request');
+  assert.deepEqual(calls, []);
+});
+
+test('an empty token file is refused the same way as a missing one', async () => {
+  const calls = [];
+  const client = createTapdClient({
+    tokenFile: 'C:/empty/tapd.token',
+    readFile: () => '  \n',
+    request: async (url) => { calls.push(url); return response({ status: 1, data: { Bug: { id: '1' } } }); },
+  });
+  const err = await client.createBug({ workspace_id: '1', title: 'T' }).catch((e) => e);
+  assert.match(err.message, /令牌/);
+  assert.equal(err.unsent, true);
   assert.deepEqual(calls, []);
 });
 

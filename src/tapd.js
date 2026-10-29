@@ -31,6 +31,16 @@ const DEFAULT_BASE_URL = 'https://api.tapd.cn';
 const DEFAULT_TIMEOUT_MS = 15_000;
 const INFO_LIMIT = 160;
 
+// A failure raised before the HTTP request exists is provably not on TAPD's
+// side, so the card may tell the operator a retry is safe. Everything that
+// fails at or after the request (timeout, 5xx, reset) stays unclassified: with
+// no idempotency key and no delete API, the write may already have landed.
+function unsentError(message) {
+  const err = new Error(message);
+  err.unsent = true;
+  return err;
+}
+
 function appendLine(target, value) {
   if (value === '') return target;
   return target === '' ? value : `${target}\n${value}`;
@@ -161,7 +171,7 @@ export function createTapdClient({
   return {
     async createBug(payload, { tokenFile: override } = {}) {
       const token = resolveApiKey({ apiKeyEnv: '', apiKeyFile: override ?? tokenFile, readFile });
-      if (!token) throw new Error('tapd: 令牌文件不可读或为空');
+      if (!token) throw unsentError('tapd: 令牌文件不可读或为空');
 
       const res = await request(`${baseUrl}/bugs`, {
         method: 'POST',

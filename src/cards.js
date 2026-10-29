@@ -74,9 +74,14 @@ export function buildQueryCard({ job, projects, tapd = null }) {
   // different reason: TAPD has no idempotency key, so a timeout or 5xx after
   // the write landed is indistinguishable from a total failure, and a blind
   // retry would file the one ticket nobody can delete. The retry button stays
-  // live; the operator checks TAPD first, the card just says so.
+  // live; the operator checks TAPD first, the card just says so. The one
+  // exception is a failure raised before any request was sent (`unsent`):
+  // there is nothing to check, so saying "outcome unknown" would send the
+  // operator on a useless trip and only the safe-retry fact is true.
   const tapdNote = job.tapd?.status === 'failed'
-    ? text(`TAPD 提单失败：${String(job.tapd.error).slice(0, 200)}\n提交结果可能未知：若上一次请求已发出，请先在 TAPD 确认没有重复单再重试。`)
+    ? job.tapd.unsent === true
+      ? text(`未提交：${String(job.tapd.error).slice(0, 200)}（没有向 TAPD 发出请求，可直接重试）`)
+      : text(`TAPD 提单失败：${String(job.tapd.error).slice(0, 200)}\n提交结果可能未知：若上一次请求已发出，请先在 TAPD 确认没有重复单再重试。`)
     : job.tapd?.status === 'submitting'
       ? text('若服务已重启，请先在 TAPD 确认是否已建单，避免重复提交。')
       : null;

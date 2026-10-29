@@ -127,6 +127,22 @@ test('a failed submit says the outcome may be unknown before the operator retrie
     'the card warns that the send may already have landed');
 });
 
+test('a failure that never reached TAPD says a retry is safe instead of sending the operator to the tracker', () => {
+  const nodes = walk(buildQueryCard({
+    job: { ...job, ...done, tapd: { status: 'failed', unsent: true, error: 'tapd: 令牌文件不可读或为空' } },
+    projects,
+    tapd: tapdEntry,
+  }));
+  const note = nodes.find((node) => node.tag === 'div' && node.text?.content.startsWith('未提交：'));
+  assert.ok(note, 'the unsent failure has its own note');
+  assert.equal(note.text.content,
+    '未提交：tapd: 令牌文件不可读或为空（没有向 TAPD 发出请求，可直接重试）');
+  assert.ok(!note.text.content.includes('提交结果可能未知'), 'no pointless trip to TAPD');
+  const retry = nodes.find((node) => node.tag === 'button' && node.name === 'tapd');
+  assert.ok(retry, 'the retry button is still rendered');
+  assert.equal(retry.disabled, false);
+});
+
 test('an unawaiting job without a finished status never renders the button', () => {
   for (const status of ['awaiting', 'running', 'expired', 'failed', 'cancelled', 'interrupted']) {
     const rendered = JSON.stringify(buildQueryCard({ job: { ...job, status }, projects, tapd: tapdEntry }));

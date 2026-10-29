@@ -77,6 +77,21 @@ function clip(value, max) {
   return text.length > max ? text.slice(0, max) : text;
 }
 
+// TAPD renders `description` as HTML, so a bare newline collapses the whole
+// ticket body into one run-on paragraph. Every template line leaves as a break,
+// and free-form text (group chatter, model output, a display name) is escaped
+// first so it cannot inject markup into another team's tracker.
+const BR = '<br />';
+const BLANK = '<br /><br />';
+
+function esc(value) {
+  return String(value ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+function line(value) {
+  return esc(value).replace(/\r?\n/g, BR);
+}
+
 function firstClause(text) {
   return String(text ?? '').split(/[。\n；;]/).map((part) => part.trim()).find((part) => part !== '') ?? '';
 }
@@ -107,13 +122,13 @@ function questionSection(question) {
 // too long the analysis text shrinks and the footer keeps the last line — cutting an
 // over-long model answer is recoverable, an anonymous ticket is not.
 function assembleDescription({ body, analysisBlock, foot }) {
-  const tail = `${analysisBlock}\n${foot}`;
-  const room = DESCRIPTION_LIMIT - tail.length - 2;
+  const tail = `${analysisBlock}${BR}${foot}`;
+  const room = DESCRIPTION_LIMIT - tail.length - BLANK.length;
   if (room >= 0) {
     const head = clip(body, room);
-    return head === '' ? tail : `${head}\n\n${tail}`;
+    return head === '' ? tail : `${head}${BLANK}${tail}`;
   }
-  return `${clip(analysisBlock, Math.max(0, DESCRIPTION_LIMIT - foot.length - 1))}\n${foot}`;
+  return `${clip(analysisBlock, Math.max(0, DESCRIPTION_LIMIT - foot.length - BR.length))}${BR}${foot}`;
 }
 
 export function buildBugPayload({ report, entry, projects = [] }) {
@@ -130,22 +145,22 @@ export function buildBugPayload({ report, entry, projects = [] }) {
   const question = questionSection(report.question);
   const images = Array.isArray(report.images) ? report.images : [];
   const body = [
-    '【问题描述】', question, '',
-    '【操作步骤】', ...steps(parts.repro), '',
+    '【问题描述】', line(question), '',
+    '【操作步骤】', ...steps(parts.repro).map(line), '',
     '【预期结果】', '正常', '',
-    '【实际结果】', question,
+    '【实际结果】', line(question),
     ...(images.length
-      ? [`（另有 ${images.length} 张截图，见飞书群消息 ${report.triggerMessageId}，本单不附带图片）`]
+      ? [line(`（另有 ${images.length} 张截图，见飞书群消息 ${report.triggerMessageId}，本单不附带图片）`)]
       : []),
-  ].join('\n');
+  ].join(BR);
   const analysisBlock = [
     '【蔡龙自动分析】',
-    `结论：${parts.conclusion || '（无）'}`,
-    `定位：${parts.location || '（无）'}`,
-    `依据：${parts.evidence || '（无）'}`,
-    `建议：${parts.advice || '（无）'}`,
-  ].join('\n');
-  const foot = `—— 蔡龙自动分析 · ${report.provenance ?? ''} · 由 ${report.confirmer ?? ''} 确认`;
+    line(`结论：${parts.conclusion || '（无）'}`),
+    line(`定位：${parts.location || '（无）'}`),
+    line(`依据：${parts.evidence || '（无）'}`),
+    line(`建议：${parts.advice || '（无）'}`),
+  ].join(BR);
+  const foot = `—— 蔡龙自动分析 · ${esc(report.provenance ?? '')} · 由 ${esc(report.confirmer ?? '')} 确认`;
 
   return {
     workspace_id: String(entry.workspaceId),

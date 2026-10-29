@@ -879,7 +879,7 @@ test('the running job keeps the raw analysis so the ticket can reuse it', async 
   });
   await h.engine.tick();
   assert.equal(seen.length, 1);
-  assert.match(seen[0].description, /【操作步骤】\n1\. 打开铁匠铺 2\. 点击锻造\n/);
+  assert.match(seen[0].description, /【操作步骤】<br \/>1\. 打开铁匠铺 2\. 点击锻造<br \/>/);
 });
 
 test('no TAPD client means no submit path at all', async () => {

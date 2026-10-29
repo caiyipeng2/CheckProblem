@@ -65,12 +65,35 @@ test('payload title cuts at the first sentence mark and caps at 100 chars', () =
 
 test('payload description follows the team ticket template', () => {
   const description = buildBugPayload({ report, entry, projects }).description;
-  assert.ok(description.startsWith('【问题描述】\nuid：27019278 锻造按钮不能点击\n\n【操作步骤】\n'));
-  assert.match(description, /【操作步骤】\n1\. 进入铁匠铺\n2\. 点击锻造按钮\n/);
-  assert.match(description, /【预期结果】\n正常\n/);
-  assert.match(description, /【实际结果】\nuid：27019278 锻造按钮不能点击\n（另有 2 张截图，见飞书群消息 om_1，本单不附带图片）\n/);
-  assert.match(description, /【蔡龙自动分析】\n结论：配置缺失：奖励表没有 27019278 这一档\n/);
+  assert.ok(
+    description.startsWith('【问题描述】<br />uid：27019278 锻造按钮不能点击<br /><br />【操作步骤】<br />'),
+    'TAPD renders the description as HTML, so every template line needs a real break',
+  );
+  assert.match(description, /【操作步骤】<br \/>1\. 进入铁匠铺<br \/>2\. 点击锻造按钮<br \/><br \/>/);
+  assert.match(description, /【预期结果】<br \/>正常<br \/><br \/>/);
+  assert.match(description, /【实际结果】<br \/>uid：27019278 锻造按钮不能点击<br \/>（另有 2 张截图，见飞书群消息 om_1，本单不附带图片）<br \/><br \/>/);
+  assert.match(description, /【蔡龙自动分析】<br \/>结论：配置缺失：奖励表没有 27019278 这一档<br \/>定位：/);
   assert.match(description, /—— 蔡龙自动分析 · master@a1b2c3d · 由 蔡逸鹏 确认$/);
+});
+
+test('description lines break where the group text broke', () => {
+  const description = buildBugPayload({
+    report: { ...report, question: '第一行\n第二行' },
+    entry,
+    projects,
+  }).description;
+  assert.ok(description.includes('【问题描述】<br />第一行<br />第二行'));
+});
+
+test('group text is escaped, not injected into the ticket', () => {
+  const description = buildBugPayload({
+    report: { ...report, question: '<script>alert(1)</script> & 存档', confirmer: '<b>蔡逸鹏</b>' },
+    entry,
+    projects,
+  }).description;
+  assert.ok(!description.includes('<script>'), 'no raw tag from group text reaches TAPD');
+  assert.ok(description.includes('&lt;script&gt;alert(1)&lt;/script&gt; &amp; 存档'));
+  assert.ok(description.includes('由 &lt;b&gt;蔡逸鹏&lt;/b&gt; 确认'));
 });
 
 test('payload falls back when the model gave no repro', () => {
@@ -79,7 +102,7 @@ test('payload falls back when the model gave no repro', () => {
     entry,
     projects,
   }).description;
-  assert.match(description, /【操作步骤】\n1\. 按【问题描述】里的操作复现\n/);
+  assert.match(description, /【操作步骤】<br \/>1\. 按【问题描述】里的操作复现/);
 });
 
 test('an analysis outside the five-section contract is refused, never filed', () => {
@@ -117,7 +140,7 @@ test('payload keeps the analysis and the footer when the question is a wall of t
     projects,
   }).description;
   assert.ok(description.length <= 6000, 'the hard ticket limit still holds');
-  assert.match(description, /【蔡龙自动分析】\n结论：配置缺失：奖励表没有 27019278 这一档\n/);
+  assert.match(description, /【蔡龙自动分析】<br \/>结论：配置缺失：奖励表没有 27019278 这一档<br \/>/);
   assert.ok(description.includes('定位：Assets/a.cs:12'), 'the whole analysis block survives');
   assert.ok(description.includes('依据：表里没有该档位。'), 'the whole analysis block survives');
   assert.ok(description.includes('建议：补一行配置。'), 'the whole analysis block survives');

@@ -113,3 +113,133 @@ test('loadConfig always provides a screenshot directory', (t) => {
   const { file } = projectConfig(t);
   assert.match(loadConfig(file).paths.imagesDir, /checkproblem-images$/);
 });
+
+const tapdBase = () => ({
+  chatId: 'oc_x', selfOpenId: 'ou_x',
+  projects: [{ id: 'weapon', name: '武器店', url: 'https://example.com/w.git' }],
+  tapd: {
+    tokenFile: 'C:/secrets/tapd.token',
+    fields: { versionReport: '每周迭代版本', currentOwner: '小鱼;', priority: 'medium' },
+    workspaces: {
+      weapon: { workspaceId: '59180547' },
+      gear: { workspaceId: '12345678', fields: { currentOwner: '阿鱼;' } },
+    },
+  },
+});
+
+function writeTapd(t, value) {
+  const dir = mkdtempSync(join(tmpdir(), 'cfg-tapd-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const file = join(dir, 'config.json');
+  writeFileSync(file, JSON.stringify(value));
+  return file;
+}
+
+// tapdBase's workspaces cover both projects, so every case that reaches the
+// workspace loop needs the gear project to exist.
+const tapdBothProjects = () => {
+  const value = tapdBase();
+  value.projects.push({ id: 'gear', name: '齿轮', url: 'https://example.com/g.git' });
+  return value;
+};
+
+test('tapd config resolves per-project entries with merged fields', (t) => {
+  const cfg = loadConfig(writeTapd(t, { ...tapdBase(), projects: [...tapdBase().projects,
+    { id: 'gear', name: '齿轮', url: 'https://example.com/g.git' }] }));
+  assert.equal(cfg.tapd.baseUrl, 'https://api.tapd.cn');
+  assert.equal(cfg.tapd.workspaces.weapon.workspaceId, '59180547');
+  assert.equal(cfg.tapd.workspaces.weapon.tokenFile, 'C:/secrets/tapd.token');
+  assert.deepEqual(cfg.tapd.workspaces.weapon.fields, {
+    version_report: '每周迭代版本', current_owner: '小鱼;', priority: 'medium',
+  });
+  assert.equal(cfg.tapd.workspaces.gear.fields.current_owner, '阿鱼;', 'per-project field wins');
+  assert.equal(cfg.tapd.workspaces.gear.version_report, undefined);
+});
+
+test('a per-project token file overrides the default', (t) => {
+  const value = tapdBothProjects();
+  value.tapd.workspaces.weapon.tokenFile = 'C:/secrets/gear.token';
+  assert.equal(loadConfig(writeTapd(t, value)).tapd.workspaces.weapon.tokenFile, 'C:/secrets/gear.token');
+});
+
+test('no tapd section means the feature is off', (t) => {
+  const value = tapdBase();
+  delete value.tapd;
+  assert.equal(loadConfig(writeTapd(t, value)).tapd, undefined);
+});
+
+for (const [label, mutate, pattern] of [
+  ['tokenFile missing', (v) => { delete v.tapd.tokenFile; }, /tokenFile/],
+  ['http base url', (v) => { v.tapd.baseUrl = 'http://api.tapd.cn'; }, /https/],
+  ['workspace id not digits', (v) => { v.tapd.workspaces.weapon.workspaceId = 'abc'; }, /workspaceId/],
+  ['unknown project', (v) => { v.tapd.workspaces.nope = { workspaceId: '12345678' }; }, /no matching project/],
+  ['unknown field name', (v) => { v.tapd.fields.reporter = 'x'; }, /reporter/],
+  ['over long field value', (v) => { v.tapd.fields.os = '机'.repeat(101); }, /too long/],
+  ['tapd without projects', (v) => { delete v.projects; }, /requires projects/],
+]) {
+  test(`tapd config rejects ${label}`, (t) => {
+    const value = tapdBothProjects();
+    mutate(value);
+    assert.throws(() => loadConfig(writeTapd(t, value)), pattern);
+  });
+}
+
+// src/tapd.js buildBugPayload spreads this fields map LAST, so a key named
+// title/description/workspace_id would overwrite the analysis the service just built
+// (an empty ticket) or retarget it at another team's tracker. Nothing next to that
+// spread would remind a future reader, so the config layer proves it rejects them.
+for (const key of ['title', 'description', 'workspace_id']) {
+  test(`tapd config cannot inject the payload key ${key}`, (t) => {
+    for (const [where, fields] of [
+      ['tapd.fields', (v) => v.tapd.fields],
+      ['per-project fields', (v) => (v.tapd.workspaces.weapon.fields ??= {})],
+    ]) {
+      const value = tapdBothProjects();
+      fields(value)[key] = 'injected by config';
+      assert.throws(() => loadConfig(writeTapd(t, value)), new RegExp(`unknown field ${key}$`), where);
+    }
+  });
+}
+
+// JSON configs reach the whitelist as own properties, and every other key of a plain
+// object literal is inherited from Object.prototype — so an `in` check would accept
+// constructor/toString/__proto__ and map them to something that is not a TAPD field.
+test('tapd config rejects keys inherited from Object.prototype', (t) => {
+  for (const key of ['constructor', 'toString', 'hasOwnProperty', '__proto__']) {
+    const value = tapdBothProjects();
+    Object.defineProperty(value.tapd.fields, key, { value: 'injected', enumerable: true, writable: true, configurable: true });
+    let message = '';
+    try {
+      loadConfig(writeTapd(t, value));
+    } catch (err) {
+      message = err.message;
+    }
+    assert.match(message, new RegExp(`unknown field ${key}$`), key);
+  }
+});
+
+test('the eight template parameters are the only accepted field names', (t) => {
+  const value = tapdBothProjects();
+  value.tapd.fields = {
+    versionReport: '每周迭代版本', os: '安卓', te: '小鱼', currentOwner: '阿鱼;',
+    cc: 'a;b', severity: 'normal', priority: 'high', frequency: '100%',
+  };
+  assert.deepEqual(loadConfig(writeTapd(t, value)).tapd.workspaces.weapon.fields, {
+    version_report: '每周迭代版本', os: '安卓', te: '小鱼', current_owner: '阿鱼;',
+    cc: 'a;b', severity: 'normal', priority: 'high', frequency: '100%',
+  });
+});
+
+test('a rejected tapd field names its key without echoing the value', (t) => {
+  const value = tapdBothProjects();
+  const long = '机'.repeat(101);
+  value.tapd.fields.os = long;
+  let message = '';
+  try {
+    loadConfig(writeTapd(t, value));
+  } catch (err) {
+    message = err.message;
+  }
+  assert.match(message, /tapd\.fields\.os/);
+  assert.equal(message.includes('机'.repeat(5)), false);
+});

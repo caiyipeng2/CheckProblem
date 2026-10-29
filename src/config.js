@@ -30,6 +30,68 @@ const DEFAULTS = {
   dryRun: false,
 };
 
+// TAPD takes a fixed set of fields, and the operator writes them with the UI names.
+// Mapping once here means src/tapd.js never guesses parameter names, and an unknown
+// key fails at startup instead of silently dropping a value the tester expects.
+//
+// The list is closed on purpose, not just tidy: buildBugPayload spreads this map LAST,
+// so `title`, `description` or `workspace_id` here would overwrite the analysis and the
+// target workspace of an already-built ticket. Nothing reaches the payload key except
+// the eight names below.
+const TAPD_FIELDS = {
+  versionReport: 'version_report',
+  os: 'os',
+  te: 'te',
+  currentOwner: 'current_owner',
+  cc: 'cc',
+  severity: 'severity',
+  priority: 'priority',
+  frequency: 'frequency',
+};
+const TAPD_VALUE_LIMIT = 100;
+const WORKSPACE_ID = /^\d{6,20}$/;
+
+function tapdFields(raw, where) {
+  const out = {};
+  for (const [key, value] of Object.entries(raw ?? {})) {
+    // Object.hasOwn, not `in`: a config object comes from JSON.parse, so a key like
+    // `constructor` or `__proto__` is an own property that `in` would accept through
+    // Object.prototype and map to a function instead of a TAPD parameter name.
+    if (!Object.hasOwn(TAPD_FIELDS, key)) throw new Error(`config: ${where} has unknown field ${key}`);
+    if (value === null || value === undefined) continue;
+    const text = String(value);
+    // The key is named, never the value: an over-long field is proof of a mistake, and
+    // the config file may hold text that does not belong in a log line.
+    if (text.length > TAPD_VALUE_LIMIT) throw new Error(`config: ${where}.${key} is too long`);
+    if (text.trim() !== '') out[TAPD_FIELDS[key]] = text;
+  }
+  return out;
+}
+
+export function normalizeTapd(raw, projects) {
+  if (raw === undefined) return undefined;
+  if (!raw || typeof raw !== 'object') throw new Error('config: tapd must be an object');
+  if (!Array.isArray(projects) || projects.length === 0) throw new Error('config: tapd requires projects');
+  const tokenFile = typeof raw.tokenFile === 'string' && raw.tokenFile.trim() !== '' ? raw.tokenFile.trim() : null;
+  if (!tokenFile) throw new Error('config: tapd.tokenFile is required');
+  const baseUrl = raw.baseUrl === undefined ? 'https://api.tapd.cn' : String(raw.baseUrl);
+  if (!/^https:\/\/api\.tapd\.cn(\/.*)?$/.test(baseUrl)) throw new Error('config: tapd.baseUrl must be https://api.tapd.cn');
+  const base = tapdFields(raw.fields, 'tapd.fields');
+  const ids = new Set(projects.map((project) => project.id));
+  const workspaces = {};
+  for (const [projectId, value] of Object.entries(raw.workspaces ?? {})) {
+    if (!ids.has(projectId)) throw new Error(`config: tapd.workspaces.${projectId} has no matching project`);
+    const workspaceId = String(value?.workspaceId ?? '');
+    if (!WORKSPACE_ID.test(workspaceId)) throw new Error(`config: tapd.workspaces.${projectId}.workspaceId must be 6-20 digits`);
+    // A path is checked for shape only: createTapdClient reads it at ticket time, so the
+    // file may live on a machine that exists only at deploy.
+    const override = value?.tokenFile === undefined ? tokenFile : String(value.tokenFile).trim();
+    if (override === '') throw new Error(`config: tapd.workspaces.${projectId}.tokenFile is empty`);
+    workspaces[projectId] = { workspaceId, tokenFile: override, fields: { ...base, ...tapdFields(value?.fields, `tapd.workspaces.${projectId}.fields`) } };
+  }
+  return { baseUrl, tokenFile, workspaces };
+}
+
 export function loadConfig(filePath) {
   const abs = resolve(filePath);
   const root = dirname(abs);
@@ -50,10 +112,15 @@ export function loadConfig(filePath) {
     Object.assign(projectConfig, { projects, defaultProjectId });
   }
 
+  // An absent tapd block leaves config.tapd undefined, and every card and ticket
+  // feature stays off.
+  const tapd = normalizeTapd(raw.tapd, projects);
+
   return {
     ...DEFAULTS,
     ...raw,
     ...projectConfig,
+    ...(tapd ? { tapd } : {}),
     analyze: {
       ...DEFAULTS.analyze,
       ...(raw.analyze ?? {}),

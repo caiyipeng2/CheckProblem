@@ -204,3 +204,20 @@ test('saveState leaves no .tmp file behind', (t) => {
     messageId: '',
   });
 });
+
+test('loadState keeps recent reports and drops a corrupt ones field', (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'st-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const file = join(dir, 'state.json');
+  writeFileSync(file, JSON.stringify({
+    version: 1, startedAt: 1, lastSeen: { createTimeMs: 5, messageId: 'om_5' }, job: null,
+    reports: Array.from({ length: 25 }, (_, i) => ({ requestId: `r${i}`, status: 'completed' })),
+  }));
+  assert.equal(loadState(file).reports.length, 20);
+  assert.equal(loadState(file).reports.at(-1).requestId, 'r24');
+
+  writeFileSync(file, JSON.stringify({
+    version: 1, startedAt: 1, lastSeen: { createTimeMs: 5, messageId: 'om_5' }, job: null, reports: 'oops',
+  }));
+  assert.deepEqual(loadState(file).reports, []);
+});

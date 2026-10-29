@@ -1,9 +1,13 @@
 import { randomUUID } from 'node:crypto';
 import { buildBranchOptions, buildQueryCard } from './cards.js';
+import { buildBugPayload } from './tapd.js';
 
-export function createCardRequests({ config, state, lark, listBranches, clock, saveState, log, runJob }) {
+const REPORT_LIMIT = 20;
+
+export function createCardRequests({ config, state, lark, listBranches, clock, saveState, log, runJob, tapd = null }) {
   const queue = [];
-  const card = (job) => buildQueryCard({ job, projects: config.projects });
+  const entryFor = (projectId) => (tapd ? config.tapd?.workspaces?.[projectId] ?? null : null);
+  const card = (job) => buildQueryCard({ job, projects: config.projects, tapd: entryFor(job.projectId) });
   const update = (job) => lark.updateCard(job.promptMessageId, card(job));
 
   async function publish(job) {
@@ -26,10 +30,21 @@ export function createCardRequests({ config, state, lark, listBranches, clock, s
     }
   }
 
+  function rememberReport(closed) {
+    const previous = (Array.isArray(state.reports) ? state.reports : [])
+      .filter((item) => item.requestId !== closed.requestId);
+    const snapshot = { ...closed, finishedAt: clock() };
+    state.reports = [...previous, snapshot].slice(-REPORT_LIMIT);
+    return snapshot;
+  }
+
   async function finish(job, status) {
     if (!job.card) return;
-    const closed = { ...job, status, note: '', branches: job.branch ? [job.branch] : [], branchPage: 0 };
-    const pending = { messageId: job.promptMessageId, card: card(closed) };
+    let closed = { ...job, status, note: '', branches: job.branch ? [job.branch] : [], branchPage: 0 };
+    // A completed job becomes the stored report object itself, so the card we
+    // are about to PATCH and the report a later press finds are the same thing.
+    if (status === 'completed') closed = rememberReport(closed);
+    const pending = { messageId: closed.promptMessageId, card: card(closed) };
     state.cardUpdates = (state.cardUpdates ?? []).filter((item) => item.messageId !== pending.messageId);
     state.cardUpdates.push(pending);
     if (state.job?.requestId === job.requestId) state.job = null;
@@ -69,22 +84,54 @@ export function createCardRequests({ config, state, lark, listBranches, clock, s
     return job;
   }
 
+  // Everything that must hold for any card action, regardless of which job it
+  // belongs to: same chat, a plausible operator, and a parseable action value.
+  function readEvent(event) {
+    if (event?.type !== 'card.action.trigger') return null;
+    if (event.chat_id !== config.chatId) return null;
+    if (typeof event.operator_id !== 'string' || !/^ou_[A-Za-z0-9_-]+$/.test(event.operator_id)) return null;
+    if (typeof event.event_id !== 'string' || !event.event_id || event.event_id.length > 200) return null;
+    if (typeof event.action_value !== 'string' || event.action_value.length > 1000) return null;
+    if (event.option !== undefined && (typeof event.option !== 'string' || event.option.length > 500)) return null;
+    try {
+      const action = JSON.parse(event.action_value);
+      if (!action || typeof action.requestId !== 'string' || !Number.isSafeInteger(action.revision)) return null;
+      return { action, event };
+    } catch {
+      return null;
+    }
+  }
+
   function enqueue(event) {
-    const job = state.job;
-    if (event?.type !== 'card.action.trigger' || !job?.card || job.status !== 'awaiting') return false;
-    if (event.chat_id !== config.chatId || event.message_id !== job.promptMessageId) return false;
-    if (typeof event.operator_id !== 'string' || !/^ou_[A-Za-z0-9_-]+$/.test(event.operator_id)) return false;
-    if (typeof event.event_id !== 'string' || !event.event_id || event.event_id.length > 200) return false;
-    if (typeof event.action_value !== 'string' || event.action_value.length > 1000) return false;
-    if (event.option !== undefined && (typeof event.option !== 'string' || event.option.length > 500)) return false;
-    let action;
-    try { action = JSON.parse(event.action_value); } catch { return false; }
-    if (!action || action.requestId !== job.requestId || !Number.isSafeInteger(action.revision)) return false;
-    const expectedTag = ['project', 'branch'].includes(action.action) ? 'select_static' : 'button';
-    if (!['project', 'branch', 'start', 'cancel'].includes(action.action) || event.action_tag !== expectedTag) return false;
+    const read = readEvent(event);
+    if (!read) return false;
+    const { action, event: cardEvent } = read;
     if (queue.length >= 100) throw new Error('卡片事件队列已满，停止接收以避免丢失操作');
+
+    if (action.action === 'tapd') {
+      if (!tapd || cardEvent.action_tag !== 'button') return false;
+      const report = (state.reports ?? []).find((item) => item.requestId === action.requestId);
+      if (!report || report.status !== 'completed') return false;
+      if (cardEvent.message_id !== report.promptMessageId) return false;
+      // The revision is the idempotency key: the card we are looking at is the
+      // one that rendered this number, and a press consumes it.
+      if (action.revision !== report.revision) return false;
+      // A `submitting` report is deliberately let through: submitTapd refuses
+      // it by status, so the queued press cannot file a second ticket. Only a
+      // finished report is refused here, because its card no longer has a button.
+      if (report.tapd?.status === 'done') return false;
+      queue.push({ action: 'tapd', requestId: action.requestId, revision: action.revision, operatorId: cardEvent.operator_id });
+      return true;
+    }
+
+    const job = state.job;
+    if (!job?.card || job.status !== 'awaiting') return false;
+    if (cardEvent.message_id !== job.promptMessageId) return false;
+    const expectedTag = ['project', 'branch'].includes(action.action) ? 'select_static' : 'button';
+    if (!['project', 'branch', 'start', 'cancel'].includes(action.action) || cardEvent.action_tag !== expectedTag) return false;
+    if (action.requestId !== job.requestId) return false;
     queue.push({ action: action.action, requestId: action.requestId, revision: action.revision,
-      option: event.option, operatorId: event.operator_id });
+      option: cardEvent.option, operatorId: cardEvent.operator_id });
     return true;
   }
 
@@ -101,6 +148,46 @@ export function createCardRequests({ config, state, lark, listBranches, clock, s
     return false;
   }
 
+  async function publishCard(report) {
+    const pending = { messageId: report.promptMessageId, card: card(report) };
+    state.cardUpdates = (state.cardUpdates ?? []).filter((item) => item.messageId !== pending.messageId);
+    state.cardUpdates.push(pending);
+    saveState(state);
+    await retryTerminalUpdates();
+  }
+
+  async function submitTapd(event) {
+    const report = (state.reports ?? []).find((item) => item.requestId === event.requestId);
+    if (!report) return;
+    const entry = entryFor(report.projectId);
+    if (!entry) return;
+    if (report.revision !== event.revision || report.tapd?.status === 'done' || report.tapd?.status === 'submitting') return;
+
+    // Book the press before the network call: a second click on the old card
+    // revision is now rejected, and a crash mid-request leaves `submitting`
+    // rather than a silent second ticket.
+    report.revision += 1;
+    report.tapd = { status: 'submitting' };
+    saveState(state);
+    // Persist the disabled card through the same retry queue before the write:
+    // if the process dies during the request, the card can still say the state
+    // is unknown after the restart instead of silently offering the button.
+    await publishCard(report);
+    try {
+      const { bugId, url } = await tapd.createBug(
+        buildBugPayload({ report, entry, projects: config.projects }),
+        { tokenFile: entry.tokenFile },
+      );
+      report.tapd = { status: 'done', bugId, url, at: clock() };
+      log?.info?.(`tapd: ${report.triggerMessageId} -> bug ${bugId}`);
+    } catch (err) {
+      report.tapd = { status: 'failed', error: String(err?.message ?? err).slice(0, 200) };
+      log?.warn?.(`tapd submit failed for ${report.triggerMessageId}: ${report.tapd.error}`);
+    }
+    saveState(state);
+    await publishCard(report);
+  }
+
   async function processPending() {
     if (await cancelPending()) return;
     await retryTerminalUpdates();
@@ -108,6 +195,10 @@ export function createCardRequests({ config, state, lark, listBranches, clock, s
     while (queue.length) {
       if (await cancelPending()) return;
       const event = queue.shift();
+      if (event.action === 'tapd') {
+        await submitTapd(event);
+        continue;
+      }
       const job = state.job;
       if (!job?.card || job.status !== 'awaiting' || job.requestId !== event.requestId) continue;
       if (clock() > job.expiresAt) continue;

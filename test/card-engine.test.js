@@ -30,6 +30,7 @@ function harness(overrides = {}) {
     confirmTimeoutSec: 600, contextMessages: 2, maxReplyChars: 4000,
     projects, defaultProjectId: 'weapon',
     paths: { jobsDir: 'unused', imagesDir: join(tmpdir(), 'checkproblem-images-unused') },
+    ...(overrides.tapdConfig ? { tapd: overrides.tapdConfig } : {}),
   };
   const lark = {
     listMessages: async () => batch,
@@ -53,6 +54,7 @@ function harness(overrides = {}) {
     syncRepo: async (repo) => { calls.push(['sync', repo]); return { provenance: `${repo.branch}@abc1234` }; },
     retrieve: async (question, repo) => { calls.push(['search', repo]); return { digest: 'evidence' }; },
     runAnalysis: async (prompt, repo) => { calls.push(['analysis', repo]); return { text: '查询结果' }; },
+    tapd: overrides.tapdClient ?? null,
     ...overrides.engine,
   });
   function event(action, option, extra = {}) {
@@ -596,4 +598,177 @@ test('at most four screenshots are attached and a failed download never blocks t
   assert.equal(seen.images.length, 3, 'the failed download is skipped, the rest still reach the model');
   assert.match(h.replies.at(-1).text, /查询结果/);
   assert.equal(h.state.job, null);
+});
+
+const TAPD_CONFIG = {
+  baseUrl: 'https://api.tapd.cn',
+  tokenFile: 'C:/secrets/tapd.token',
+  workspaces: { weapon: { workspaceId: '59180547', tokenFile: 'C:/secrets/tapd.token', fields: { current_owner: '小鱼;' } } },
+};
+const FULL_ANALYSIS = [
+  '【结论】配置缺失：奖励表没有该档位',
+  '【复现】1. 打开铁匠铺 2. 点击锻造',
+  '【定位】Assets/a.cs:12',
+  '【依据】表里没有。',
+  '【建议】补一行配置。',
+].join('\n');
+
+function submittedHarness(overrides = {}) {
+  // `engine` is merged instead of replaced so a test that only swaps the TAPD
+  // client still gets the five-section analysis text the ticket is built from.
+  const { engine: engineOverrides, ...rest } = overrides;
+  return harness({
+    tapdConfig: TAPD_CONFIG,
+    ...rest,
+    engine: { runAnalysis: async () => ({ text: FULL_ANALYSIS }), ...engineOverrides },
+  });
+}
+
+async function completeOneJob(h) {
+  await h.engine.tick();                                // 群消息触发 -> 建卡片
+  h.engine.enqueueCardAction(h.event('start'));         // 点「开始查询」
+  // Task 7 attaches the model text to the job; until then the test stands in
+  // for it so the report/ticket path does not depend on that task.
+  h.state.job.analysis = FULL_ANALYSIS;
+  await h.engine.tick();                                // 跑分析 -> 查询完成 + 回填卡片
+  return h.state.reports[0];
+}
+
+test('a completed report is remembered with its analysis text', async () => {
+  const h = submittedHarness();
+  const report = await completeOneJob(h);
+  assert.equal(report.status, 'completed');
+  assert.equal(report.analysis, FULL_ANALYSIS);
+  assert.equal(report.projectId, 'weapon');
+  assert.equal(report.tapd, undefined);
+});
+
+test('the submit button creates one ticket and stamps the card', async () => {
+  const created = [];
+  const h = submittedHarness({
+    tapdClient: { createBug: async (payload) => { created.push(payload); return { bugId: '1159180547001002353', url: 'https://www.tapd.cn/tapd_fe/59180547/bug/detail/1159180547001002353' }; } },
+  });
+  const report = await completeOneJob(h);
+  const press = {
+    type: 'card.action.trigger', event_id: 'evt-tapd-1', chat_id: 'oc_test',
+    message_id: report.promptMessageId, operator_id: 'ou_member', action_tag: 'button',
+    action_value: JSON.stringify({ action: 'tapd', requestId: report.requestId, revision: report.revision }),
+  };
+  assert.equal(h.engine.enqueueCardAction(press), true);
+  await h.engine.tick();
+  assert.equal(created.length, 1);
+  assert.equal(created[0].workspace_id, '59180547');
+  assert.equal(created[0].current_owner, '小鱼;');
+  assert.equal(h.state.reports[0].tapd.status, 'done');
+  assert.match(h.state.reports[0].tapd.url, /tapd_fe\/59180547\/bug\/detail\/1159180547001002353$/);
+  // The card was PATCHed with the link, not the button.
+  assert.ok(JSON.stringify(h.updates.at(-1)).includes('已提单：[TAPD 1159180547001002353]'));
+  assert.ok(!JSON.stringify(h.updates.at(-1)).includes('"action":"tapd"'), 'no second bite at the same card');
+});
+
+test('the card says the ticket state is unknown while the request is still in flight', async () => {
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  const h = submittedHarness({
+    tapdClient: { createBug: async () => { await gate; return { bugId: '1', url: 'https://www.tapd.cn/tapd_fe/59180547/bug/detail/1' }; } },
+  });
+  const report = await completeOneJob(h);
+  h.engine.enqueueCardAction({
+    type: 'card.action.trigger', event_id: 'evt-in-flight', chat_id: 'oc_test',
+    message_id: report.promptMessageId, operator_id: 'ou_member', action_tag: 'button',
+    action_value: JSON.stringify({ action: 'tapd', requestId: report.requestId, revision: report.revision }),
+  });
+  const tick = h.engine.tick();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(h.state.reports[0].tapd.status, 'submitting');
+  assert.match(JSON.stringify(h.updates.at(-1)), /提交中/);
+  release();
+  await tick;
+  assert.equal(h.state.reports[0].tapd.status, 'done');
+});
+
+test('pressing submit twice in a row still creates one ticket', async () => {
+  const created = [];
+  const h = submittedHarness({
+    tapdClient: { createBug: async (payload) => { created.push(payload); return { bugId: '1', url: 'https://www.tapd.cn/tapd_fe/59180547/bug/detail/1' }; } },
+  });
+  const report = await completeOneJob(h);
+  const press = (revision) => ({
+    type: 'card.action.trigger', event_id: `evt-${revision}`, chat_id: 'oc_test',
+    message_id: report.promptMessageId, operator_id: 'ou_member', action_tag: 'button',
+    action_value: JSON.stringify({ action: 'tapd', requestId: report.requestId, revision }),
+  });
+  h.engine.enqueueCardAction(press(report.revision));
+  h.engine.enqueueCardAction(press(report.revision));
+  await h.engine.tick();
+  assert.equal(created.length, 1);
+});
+
+test('an event for an unknown or already submitted report is refused', async () => {
+  const h = submittedHarness({ tapdClient: { createBug: async () => ({ bugId: '1', url: 'u' }) } });
+  const report = await completeOneJob(h);
+  const base = { type: 'card.action.trigger', event_id: 'evt-x', chat_id: 'oc_test', message_id: report.promptMessageId, operator_id: 'ou_member', action_tag: 'button' };
+  assert.equal(h.engine.enqueueCardAction({ ...base, action_value: JSON.stringify({ action: 'tapd', requestId: 'nope', revision: report.revision }) }), false);
+  assert.equal(h.engine.enqueueCardAction({ ...base, message_id: 'om_other', action_value: JSON.stringify({ action: 'tapd', requestId: report.requestId, revision: report.revision }) }), false);
+  assert.equal(h.engine.enqueueCardAction({ ...base, action_tag: 'input', action_value: JSON.stringify({ action: 'tapd', requestId: report.requestId, revision: report.revision }) }), false);
+  await h.engine.tick();
+  assert.equal(h.state.reports[0].tapd, undefined);
+});
+
+test('a failed submit invites a retry on a fresh card revision', async () => {
+  const attempts = [];
+  const h = submittedHarness({
+    tapdClient: { createBug: async (payload) => { attempts.push(payload); throw new Error('tapd: 建单失败（HTTP 502 bad）'); } },
+  });
+  const report = await completeOneJob(h);
+  // `report` is the live stored report, so its revision advances in place when
+  // the press is booked; remember the number the card rendered.
+  const renderedRevision = report.revision;
+  const press = (revision) => ({
+    type: 'card.action.trigger', event_id: `evt-${revision}`, chat_id: 'oc_test',
+    message_id: report.promptMessageId, operator_id: 'ou_member', action_tag: 'button',
+    action_value: JSON.stringify({ action: 'tapd', requestId: report.requestId, revision }),
+  });
+  h.engine.enqueueCardAction(press(report.revision));
+  await h.engine.tick();
+  assert.equal(h.state.reports[0].tapd.status, 'failed');
+  assert.match(h.state.reports[0].tapd.error, /HTTP 502/);
+  const retryRevision = h.state.reports[0].revision;
+  assert.ok(retryRevision > renderedRevision, 'the failed press consumed its revision');
+  h.engine.enqueueCardAction(press(retryRevision));
+  await h.engine.tick();
+  assert.equal(attempts.length, 2);
+});
+
+test('a submit left in flight after a restart is never auto-retried', async () => {
+  const h = submittedHarness({ tapdClient: { createBug: async () => ({ bugId: '1', url: 'u' }) } });
+  const report = await completeOneJob(h);
+  report.tapd = { status: 'submitting' };
+  const press = {
+    type: 'card.action.trigger', event_id: 'evt-stale', chat_id: 'oc_test',
+    message_id: report.promptMessageId, operator_id: 'ou_member', action_tag: 'button',
+    action_value: JSON.stringify({ action: 'tapd', requestId: report.requestId, revision: report.revision }),
+  };
+  assert.equal(h.engine.enqueueCardAction(press), true);
+  await h.engine.tick();
+  assert.equal(h.state.reports[0].tapd.status, 'submitting', 'the operator has to look, not the service');
+});
+
+test('without a workspace mapping the finished card carries no submit action', async () => {
+  const h = harness({ engine: { runAnalysis: async () => ({ text: FULL_ANALYSIS }) } });
+  await h.engine.tick();
+  h.engine.enqueueCardAction(h.event('start'));
+  h.state.job.analysis = FULL_ANALYSIS;
+  await h.engine.tick();
+  assert.equal(h.state.reports.length, 1, 'the report is still remembered');
+  assert.ok(!JSON.stringify(h.updates.at(-1)).includes('"action":"tapd"'));
+});
+
+test('only the newest twenty completed reports are kept', async () => {
+  const h = submittedHarness({ tapdClient: { createBug: async () => ({ bugId: '1', url: 'u' }) } });
+  h.state.reports = Array.from({ length: 20 }, (_, i) => ({ requestId: `old${i}`, status: 'completed' }));
+  await completeOneJob(h);
+  assert.equal(h.state.reports.length, 20);
+  assert.equal(h.state.reports.at(-1).question, '蔡龙 查询奖励逻辑');
+  assert.ok(!h.state.reports.some((item) => item.requestId === 'old0'));
 });

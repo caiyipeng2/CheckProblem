@@ -15,6 +15,9 @@ export function initialState(nowMs = Date.now()) {
     // group history; only messages created after startup are seen.
     lastSeen: { createTimeMs: nowMs, messageId: '' },
     job: null,
+    // Finished reports the TAPD button can still address. Kept small on purpose:
+    // the card that renders them lives in Feishu, not here.
+    reports: [],
   };
 }
 
@@ -43,6 +46,9 @@ export function loadState(file, nowMs = Date.now()) {
       ...parsed,
       startedAt: Number.isFinite(parsed.startedAt) ? parsed.startedAt : nowMs,
       lastSeen: cursor,
+      // Only the shape is trusted; a hand-edited or half-written file must not
+      // feed the ticket button a report that cannot be addressed.
+      reports: Array.isArray(parsed.reports) ? parsed.reports.slice(-20) : [],
       job:
         parsed.job !== null && typeof parsed.job === 'object' ? parsed.job : null,
     };

@@ -40,9 +40,9 @@ function contextLine(msg) {
   return `${who}: ${extractPlainText(msg).trim().slice(0, CONTEXT_LINE_CHARS)}`;
 }
 
-export function createEngine({ config, lark, syncRepo, runAnalysis, state, clock, log, saveState, retrieve, listBranches }) {
+export function createEngine({ config, lark, syncRepo, runAnalysis, state, clock, log, saveState, retrieve, listBranches, tapd = null }) {
   const cards = config.projects ? createCardRequests({
-    config, state, lark, listBranches, clock, saveState, log, runJob,
+    config, state, lark, listBranches, clock, saveState, log, runJob, tapd,
   }) : null;
   const isServiceMessage = (message) => cards
     ? message?.sender?.sender_type === 'app'

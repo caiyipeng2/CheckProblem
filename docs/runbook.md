@@ -1,6 +1,6 @@
 # CheckProblem 运行手册
 
-本手册写给需要让服务持续运行的人。服务以登录用户本人的飞书身份（`lark-cli api … --as user`）默认每 15 秒轮询一个群：消息正文含「蔡龙」或被 @蔡龙 时，服务回复该消息请群成员确认；任意成员在确认窗口（默认 10 分钟）内回复「确认」后，服务对 `repo.dir` 做一次 `git fetch`、按问题关键词本地检索、再交给模型分析，把四段式诊断回复到原消息；回复「取消」则放弃。落款为 `—— 蔡龙自动分析 · <分支>@<sha>[+未提交数] · 由 <确认人> 确认`，例如 `feature/Medal-Challenge@b7540c6+22`。同一时间只处理一个任务。
+本手册写给需要让服务持续运行的人。服务以登录用户本人的飞书身份（`lark-cli api … --as user`）默认每 15 秒轮询一个群：消息正文含「蔡龙」或被 @蔡龙 时，服务回复该消息请群成员确认；任意成员在确认窗口（默认 10 分钟）内回复「确认」后，服务对 `repo.dir` 做一次 `git fetch`、按问题关键词本地检索、再交给模型分析，把五段式诊断（【结论】【复现】【定位】【依据】【建议】）回复到原消息；回复「取消」则放弃。落款为 `—— 蔡龙自动分析 · <分支>@<sha>[+未提交数] · 由 <确认人> 确认`，例如 `feature/Medal-Challenge@b7540c6+22`。同一时间只处理一个任务。查询完成的卡片上还可以一键提交 TAPD 缺陷单，见「提 TAPD 缺陷单」。
 
 ## 前置检查
 
@@ -111,6 +111,7 @@ node bin/checkproblem.js --config D:\path\config.local.json
 | `repo.url` | 无默认 | 仓库地址，`clone` 模式首次使用 |
 | `repo.branch` | `"master"` | `clone` 模式的同步分支；`copy` 模式取工作副本当前分支 |
 | `analyze.attempts` | 见下 | 按顺序尝试的分析引擎，每个有自己的预算 |
+| `tapd` | 关闭 | TAPD 缺陷单接入；删除整个块即关闭，详见「提 TAPD 缺陷单」 |
 
 `analyze.attempts` 的默认值：
 
@@ -136,6 +137,62 @@ node bin/checkproblem.js --config D:\path\config.local.json
 - 更换 `chatId` 前先停服并处理 `state/state.json`（删除，或手工把 `job` 置为 `null`），避免旧群的待确认任务跟到新群。
 - `chatId` 或 `selfOpenId` 缺失/为空时，加载配置直接报错（如 `config: chatId is required`），进程不会启动。
 - 用 `--config` 指向另一份文件时，`state/`、`logs/` 和相对的 `repo.dir` 都会跟着那份文件所在目录走。
+
+## 提 TAPD 缺陷单
+
+「查询完成」的卡片底部会多一个「提交 TAPD 缺陷单」按钮；只有 `tapd.workspaces` 里配了该项目的 workspace 才会出现。按钮不会自动建单，也不会上传截图（只留飞书群消息 ID 与张数）。
+
+配置在 `config.json` 的 `tapd` 块（与 `chatId` 同级，完整示例见 `config.example.json`）：
+
+```jsonc
+"tapd": {
+  "tokenFile": "C:/Users/EDY/.checkproblem/tapd.token",
+  "fields": {
+    "versionReport": "每周迭代版本",
+    "os": "线上安卓",
+    "te": "蔡逸鹏;",
+    "currentOwner": "小鱼;",
+    "cc": "南柯;",
+    "severity": "normal",
+    "priority": "medium",
+    "frequency": "必现"
+  },
+  "workspaces": {
+    "weapon": { "workspaceId": "59180547" },
+    "digit": { "workspaceId": "52360842", "fields": { "versionReport": "版本1" } }
+  }
+}
+```
+
+| 键 | 说明 |
+|---|---|
+| `tapd.tokenFile` | 个人访问令牌文件的默认路径，一行纯文本；缺失或为空时启动日志会 warn，按钮仍在但每次提交都会失败 |
+| `tapd.fields` | 所有项目共用的模板字段；键名用 UI 名（`versionReport` / `os` / `te` / `currentOwner` / `cc` / `severity` / `priority` / `frequency`），未知键会在启动时直接报错 |
+| `tapd.workspaces.<项目id>` | 该项目对应的 TAPD workspace，`workspaceId` 必填；key 必须是已配置的项目 id |
+| `...workspaces.<id>.tokenFile` | 可选，覆盖默认令牌文件：齿轮这类项目用的是另一份令牌 |
+| `...workspaces.<id>.fields` | 可选，按项目覆盖 `tapd.fields`（例如数字门的发现版本候选只有「版本1」） |
+| `tapd.baseUrl` | 可选，只允许 `https://api.tapd.cn`，一般不写 |
+
+令牌文件按项目读取：先看 workspace 的 `tokenFile`，没有才用 `tapd.tokenFile`。服务每次提单时现读，换令牌不用重启。**令牌文件只放在仓库外，绝不提交**；路径可以出现在配置和日志里，令牌本身不会进日志、错误消息、卡片或进程参数。
+
+第一次真实提单后，必须在 TAPD 页面上逐项核对这六个字段（它们决定测试同学会不会漏看这张单）：
+
+- 发现版本
+- 使用机型
+- 测试人
+- 处理人
+- 抄送人
+- 严重度
+
+提单规则与故障处理：
+
+- **一次点击只建一单。** 按钮回调带着卡片的 `revision`，按下即作废；同一张卡片连点两次也只会建一张单。完成态报告存在 `state/state.json` 的 `reports` 里（最近 20 条），卡片靠它找回这次分析。
+- 卡片显示「TAPD 提单失败：…提交结果可能未知…」→ 先看日志和 TAPD 列表确认没有已建的单，再按「重试提交」。超时或 5xx 之后 TAPD 可能已经建单，盲目重按会重复。
+- 卡片显示「未提交：…（没有向 TAPD 发出请求，可直接重试）」→ 请求根本没发出，重试不会重复；常见原因是令牌文件缺失/为空，或分析内容不符合五段格式（后者重试也会同样失败，需要重新发起查询）。
+- 卡片停在「提交中…」且服务重启过 → **先查 TAPD**，不要直接重按或手工补发；服务不会自动补发，按钮保持禁用。
+- 误提的单只能人工在 TAPD 页面删除：TAPD 没有删除缺陷接口。
+
+关闭功能：删除 `config.json` 里整个 `tapd` 块并重启。启动日志不再出现 `tapd enabled`，卡片不再有提单按钮，行为与接入前一致。
 
 ## 仓库安全
 

@@ -14,7 +14,10 @@
 ## 2. 不做什么（v1 范围外）
 
 - 不做自动建单：只有人按按钮才写 TAPD。
-- 不改状态：本 token 没有 `bugs::update` 权限，服务只建单，后续流转留给测试同学。
+- v1 不改单：更新与状态流转接口实测可用，但蔡龙只建一次单，后续流转留给测试同学；
+  需要「重复点击改覆盖」时再加（见 §6 的幂等取舍）。
+- 不删单：TAPD OpenAPI 没有删除缺陷接口，个人令牌也没有 `bugs::delete`。误提的单只能在页面上删，
+  或由服务把状态流转成 `rejected` 作废。
 - 不上传截图，不做图片附件接口。
 - 不做齿轮（Idle_Gear_Defence）：它在另一个令牌下，等令牌到位再按同一配置结构加一条。
 - 不做群消息 → 缺陷单的其他入口（如「取消」态、「超时」态不出现按钮）。
@@ -27,15 +30,27 @@
 | 事实 | 结论 |
 | --- | --- |
 | `POST /bugs` 建单 | 成功，`{"status":1,"info":"success"}`，返回 `data.Bug.id` |
-| `POST /bugs` 带 `bugid` | **仍然新建**，不是更新。更新要用 `POST /bugs/update` |
-| `POST /bugs/update` | 403：`doesn't have permission bugs::update` |
-| `POST /bugs/delete` | 403：`doesn't have permission bugs::delete` |
-| `GET /bugs`、`GET /bugs/get_fields_lable`、`GET /bugs/get_fields_info` | 可用 |
-| `GET /versions`、`GET /workspaces/detail`、`GET /roles/member` | 403，无权限 |
-| `GET /workspaces/projects?company_id=` | 403，公司级接口对个人令牌不开放 |
+| `POST /bugs` 带 `id` | **就是更新**（官方「更新缺陷」接口）。实测 `modified` 前进、`id`/`created` 不变 |
+| 更新时状态流转 | `id + status=rejected + resolution=duplicated` 成功，`new → rejected` |
+| `POST /bugs` 带 `bugid` | 参数名不对时按新建处理：`bugid` 被忽略，落库成一张新单 |
+| `/bugs/update`、`/bugs/delete` | 403 `bugs::update` / `bugs::delete`。`/bugs/update` 不是官方更新路径（官方就是 `POST /bugs` + `id`）；缺陷章节的官方文档里没有删除接口，只有 `delete_link_bugs`（取消关联） |
+| `GET /bugs`、`/bugs/get_fields_lable`、`/bugs/get_fields_info` | 可用 |
+| `GET /versions` | 403 `versions::_get`，版本列表读不到，版本名只能写在配置里 |
+| `GET /workspaces/user_participant_projects` | 可用，已用它拿到各项目 workspace id |
+| `GET /workspaces/projects?company_id=` | 403，公司级接口对个人令牌不开放（`api account tapd_my_token not allowed to access project`） |
 | 缺陷详情链接 | `https://www.tapd.cn/tapd_fe/{workspace_id}/bug/detail/{bug_id}` 返回 200；`GET /bugs` 不返回 url 字段，链接由我们自己拼 |
 | 换行 | `description` 里 `\n` 原样存取，无需 HTML |
 | 人员字段 | 传昵称，分号结尾：`current_owner=小鱼;`、`te=蔡逸鹏;`、`cc=南柯;` 均写入成功 |
+
+403 的两类语义要分清，否则会被误导：
+
+- `api account tapd_my_token not allowed to access project …` —— 令牌的项目授权范围问题。
+- `user <uid> doesn't have permission <资源>::<动作> of workspace …` —— 你这个账号在该项目的角色权限问题。
+  个人访问令牌没有独立权限开关，它就是你账号的权限投影。实测结论：建单、更新、状态流转都有权限；
+  `versions::*` 与 `bugs::delete` 没有（后者 TAPD 也没开放接口）。
+- 踩过的坑：任何 `<资源>/<未知子路径>` 都会被网关拼出一个 `<资源>::<动作>` 权限名并报 403，
+  看起来像「没权限」，其实可能只是路径不存在。判断接口是否存在以官方文档为准，别拿 403 反推。
+
 
 字段映射以 `get_fields_info`（含本项目候选值）为准，之前根据 UI 猜的 `baseline_find` 是错的：
 
@@ -127,7 +142,8 @@
 
 ## 6. 幂等与时序
 
-TAPD 侧没有幂等键，令牌又没有删除权限，**重复建单只能人工收拾**，所以按「一次点击一个 revision」处理：
+TAPD 侧没有幂等键，OpenAPI 又没有删除缺陷接口，**重复建单只能人工去页面上删**，所以按「一次点击一个
+revision」处理：
 
 1. 点击 → `enqueue` 校验 `action.revision === report.revision`，不匹配直接丢弃（旧卡片版本已失效）。
 2. 先把 `report.tapd = { status:'submitting' }` 并 `report.revision += 1` 落盘，再发请求。
@@ -154,11 +170,16 @@ TAPD 侧没有幂等键，令牌又没有删除权限，**重复建单只能人�
   },
   "workspaces": {
     "weapon": { "workspaceId": "59180547" },
-    "digit":  { "workspaceId": "<待补>" },
+    "digit":  { "workspaceId": "52360842", "fields": { "versionReport": "版本1" } },
     "gear":   { "workspaceId": "<待补>", "tokenFile": "C:/Users/EDY/.checkproblem/tapd-gear.token" }
   }
 }
 ```
+
+workspace id 由 `GET /workspaces/user_participant_projects` 实测得到：武器店 `59180547`、
+数字门 `52360842`（该账号还看得到军营 32241144、原始人 41963983、瘦身 48678814、矿场 63366884，
+齿轮不在其中，符合「另一个令牌」）。数字门的 `get_fields_info` 字段名与武器店一致，但发现版本候选
+只有占位的 `版本1`，所以版本名按项目覆盖。
 
 - `tapd` 缺失或 `workspaces` 为空 → 功能整体关闭，卡片不出现按钮，行为与现在完全一致。
 - `workspaces` 的 key 必须是已配置的项目 id；`workspaceId` 必须是纯数字串；`fields` 可按项目覆盖。
@@ -192,7 +213,8 @@ TAPD 侧没有幂等键，令牌又没有删除权限，**重复建单只能人�
 2. 「使用机型」按 `os` 落。请在 TAPD 里打开测试单 `1159180547001002352` 确认「线上安卓」是不是
    显示在「使用机型」框里。
 3. 「丁可」在近 400 条缺陷的昵称里查不到，默认抄送只用 `南柯;`；要加丁可请给准确昵称。
-4. 两张自测单 `...002351`、`...002352` 我没有删除权限（`bugs::delete` 403），需要你在页面上删掉。
+4. 自测单收尾：`...002351`、`...002352` 你已经在页面上删掉了；验证更新通路新建的 `...002353`
+   已经用接口流转成 `rejected`（解决方法 duplicated），它只能由你在页面上删——TAPD 没有删除缺陷接口。
 
 ## 11. 测试计划
 

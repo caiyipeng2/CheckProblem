@@ -4,7 +4,8 @@ import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createEngine } from '../src/index.js';
-import { initialState } from '../src/state.js';
+import { initialState, loadState, saveState } from '../src/state.js';
+import { buildQueryCard } from '../src/cards.js';
 
 const message = (id, text, t = 10, sender = 'ou_member') => ({
   message_id: id, create_time: String(t), msg_type: 'text', sender: { id: sender },
@@ -23,7 +24,7 @@ const projects = [
 function harness(overrides = {}) {
   let now = 1000;
   let batch = [message('om_question', '蔡龙 查询奖励逻辑')];
-  const state = initialState(0);
+  const state = overrides.state ?? initialState(0);
   const replies = [], cards = [], updates = [], calls = [], saves = [], warnings = [], downloads = [];
   const config = {
     chatId: 'oc_test', selfOpenId: 'ou_self', triggerKeyword: '蔡龙',
@@ -793,6 +794,55 @@ test('a report whose analysis ignored the five-section contract is never filed',
   const card = JSON.stringify(h.updates.at(-1));
   assert.match(card, /未提交：tapd: 分析内容无法解析/);
   assert.match(card, /没有向 TAPD 发出请求/);
+});
+
+test('a real restart reloads a submitting report and refuses the old card press', async (t) => {
+  const root = mkdtempSync(join(tmpdir(), 'checkproblem-tapd-restart-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const file = join(root, 'state.json');
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  const h = submittedHarness({
+    tapdClient: { createBug: async () => { await gate; return { bugId: '1', url: 'https://www.tapd.cn/tapd_fe/59180547/bug/detail/1' }; } },
+  });
+  const report = await completeOneJob(h);
+  const renderedRevision = report.revision;
+  const press = {
+    type: 'card.action.trigger', event_id: 'evt-restart', chat_id: 'oc_test',
+    message_id: report.promptMessageId, operator_id: 'ou_member', action_tag: 'button',
+    action_value: JSON.stringify({ action: 'tapd', requestId: report.requestId, revision: renderedRevision }),
+  };
+  assert.equal(h.engine.enqueueCardAction(press), true);
+  const inFlight = h.engine.tick();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(h.state.reports[0].tapd.status, 'submitting', 'the press is booked before the request');
+
+  // The crash: persistence is what the restarted process must rely on, so the
+  // submitted report and the consumed revision go through a real disk cycle.
+  saveState(file, h.state);
+  const loaded = loadState(file, Date.now());
+  assert.equal(loaded.reports[0].tapd.status, 'submitting', 'the in-flight state survives the disk round trip');
+  assert.equal(loaded.reports[0].revision, renderedRevision + 1, 'the press consumed its revision');
+
+  const restartedCalls = [];
+  const restarted = submittedHarness({
+    state: loaded,
+    tapdClient: { createBug: async (payload) => { restartedCalls.push(payload); return { bugId: '2', url: 'u' }; } },
+  });
+  assert.equal(restarted.engine.enqueueCardAction(press), false, 'the old card revision is no longer accepted');
+  await restarted.engine.tick();
+  assert.equal(restartedCalls.length, 0, 'a restart never files a second ticket');
+  assert.equal(restarted.state.reports[0].tapd.status, 'submitting', 'the operator has to look, not the service');
+
+  // The card the restarted process would render still explains the unknown state.
+  const card = buildQueryCard({ job: restarted.state.reports[0], projects, tapd: TAPD_CONFIG.workspaces.weapon });
+  const rendered = JSON.stringify(card);
+  assert.match(rendered, /提交中/);
+  assert.match(rendered, /若服务已重启，请先在 TAPD 确认是否已建单，避免重复提交。/);
+  assert.equal(elements(card).find((node) => node.name === 'tapd').disabled, true);
+
+  release();
+  await inFlight;
 });
 
 test('without a workspace mapping the finished card carries no submit action', async () => {

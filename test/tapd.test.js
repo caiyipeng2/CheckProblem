@@ -114,8 +114,15 @@ test('payload keeps the analysis and the footer when the question is a wall of t
 
 const TOKEN = '44f57463aa5eb3adaa6c5604967696aa24e24d85';
 
+// What TAPD actually writes when we hit an unknown route: an HTML login page, not JSON.
+const LOGIN_PAGE = '<html><head><title>登录</title></head><body>请用账号登录 TAPD</body></html>';
+
+// A string body is the literal text TAPD wrote and nothing else, so it must reach the
+// client exactly as printed and stay unparseable. Any other body is an envelope,
+// serialised here the way a JSON response would have arrived.
 function response(body, status = 200) {
-  return { ok: status >= 200 && status < 300, status, text: async () => JSON.stringify(body) };
+  const text = typeof body === 'string' ? body : JSON.stringify(body);
+  return { ok: status >= 200 && status < 300, status, text: async () => text };
 }
 
 function clientWith(capture, body, status = 200) {
@@ -161,15 +168,29 @@ test('a project-specific token file wins over the default one', async () => {
 for (const [label, body, status, expected] of [
   ['rejected by TAPD', { status: 0, info: '标题不能为空' }, 200, /标题不能为空/],
   ['http error', { status: 0, info: 'bad gateway note' }, 502, /HTTP 502/],
-  ['non json body', null, 200, /HTTP 200/],
+  ['non json body', LOGIN_PAGE, 200, /HTTP 200/],
   ['success without an id', { status: 1, info: 'success', data: [] }, 200, /未返回缺陷 ID/],
 ]) {
   test(`createBug fails loudly: ${label}`, async () => {
-    const { client, logs } = clientWith([], body ?? 'not-json', status);
+    const { client, logs } = clientWith([], body, status);
     await assert.rejects(() => client.createBug({ workspace_id: '1', title: 'T' }), expected);
     assert.equal(logs.length, 0, 'createBug does not log on its own');
   });
 }
+
+// createBug's parse guard is the difference between our own prefixed failure and a raw
+// SyntaxError that quotes the login page, so the unparseable body gets assertions the
+// shared status regex cannot make.
+test('createBug turns an unparseable body into its own failure, not a JSON error', async () => {
+  const { client, logs } = clientWith([], LOGIN_PAGE);
+  const err = await client.createBug({ workspace_id: '1', title: 'T' }).catch((e) => e);
+  assert.ok(err instanceof Error);
+  assert.notEqual(err.name, 'SyntaxError', 'the parse failure is owned by createBug');
+  assert.equal(err.message, 'tapd: 建单失败（HTTP 200） 未返回缺陷 ID');
+  assert.ok(!err.message.includes('<html'), 'the login page never reaches the operator');
+  assert.ok(!err.message.includes(TOKEN), 'and neither does the token');
+  assert.equal(logs.length, 0, 'createBug does not log on its own');
+});
 
 test('the token never appears in any error message', async () => {
   const { client } = clientWith([], { status: 0, info: 'boom' });

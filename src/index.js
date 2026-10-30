@@ -98,10 +98,18 @@ export function createEngine({ config, lark, syncRepo, runAnalysis, state, clock
     saveState(state);
 
     try {
-      // Press-to-feedback before anything slow: the operator sees 查询中 while
-      // the confirmer name and the newest remote commit are still being fetched.
-      if (job.card) await cards.update(job);
+      // Both cost a subprocess call, so they overlap. The card still has to be
+      // visibly 查询中 before the query starts — a press that cannot be shown
+      // must not launch a hidden one — but the confirmer name is only needed
+      // for the reply at the end.
+      let runningCardError = null;
+      const runningCard = job.card
+        ? cards.update(job).catch((err) => { runningCardError = err; })
+        : null;
       const confirmer = await confirmerFor(msg);
+      if (runningCard) await runningCard;
+      if (runningCardError) throw runningCardError;
+      log?.info?.('card shows 查询中');
       job.confirmer = confirmer;
       saveState(state);
       log?.info?.(`confirmed by ${confirmer}, question=${job.question}`);

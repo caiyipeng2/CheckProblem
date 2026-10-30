@@ -7,6 +7,15 @@ const REPORT_LIMIT = 20;
 
 export function createCardRequests({ config, state, lark, listBranches, clock, saveState, log, runJob, tapd = null }) {
   const queue = [];
+  let draining = null;
+  // A press is worth acting on the moment it arrives, so an accepted event
+  // drains the queue from the event callback instead of waiting for the poll.
+  const schedule = (action) => queueMicrotask(() => {
+    // The receive time of this line, against the 查询中 line, is the whole
+    // operator-visible latency: transport, queue and the card write.
+    log?.info?.(`card action ${action} received`);
+    processPending().catch((err) => log?.error?.(`card action failed: ${err?.message ?? err}`));
+  });
   const entryFor = (projectId) => (tapd ? config.tapd?.workspaces?.[projectId] ?? null : null);
   const card = (job) => buildQueryCard({ job, projects: config.projects, tapd: entryFor(job.projectId) });
   const update = (job) => lark.updateCard(job.promptMessageId, card(job));
@@ -122,6 +131,7 @@ export function createCardRequests({ config, state, lark, listBranches, clock, s
       // finished report is refused here, because its card no longer has a button.
       if (report.tapd?.status === 'done') return false;
       queue.push({ action: 'tapd', requestId: action.requestId, revision: action.revision, operatorId: cardEvent.operator_id });
+      schedule(action.action);
       return true;
     }
 
@@ -134,6 +144,7 @@ export function createCardRequests({ config, state, lark, listBranches, clock, s
     queue.push({ action: action.action, requestId: action.requestId, revision: action.revision,
       projectId: action.projectId, branch: action.branch,
       option: cardEvent.option, operatorId: cardEvent.operator_id });
+    schedule(action.action);
     return true;
   }
 
@@ -198,6 +209,14 @@ export function createCardRequests({ config, state, lark, listBranches, clock, s
   }
 
   async function processPending() {
+    // One consumer at a time: a press starts the drain from the event callback,
+    // and the poll tick joins the same run instead of racing it.
+    if (draining) return draining;
+    draining = drain().finally(() => { draining = null; });
+    return draining;
+  }
+
+  async function drain() {
     if (await cancelPending()) return;
     await retryTerminalUpdates();
     if (state.job?.cardNeedsUpdate) await publish(state.job);

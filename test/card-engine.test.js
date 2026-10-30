@@ -311,6 +311,32 @@ test('the card says 查询中 before the confirmer name is looked up', async () 
   assert.deepEqual(order.slice(0, 2), ['查询中', 'name']);
 });
 
+test('the 查询中 write and the confirmer lookup overlap', async () => {
+  const order = [];
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  const h = harness({ lark: {
+    updateCard: async () => { order.push('write'); await gate; order.push('written'); },
+    getSenderName: async () => { order.push('name'); return '确认人'; },
+  } });
+  await h.engine.tick();
+  h.engine.enqueueCardAction(h.event('start'));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(order, ['write', 'name'], 'the name is looked up while the card write is still in flight');
+  assert.equal(h.calls.length, 0, 'the query still waits for a visible 查询中 card');
+  release();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(h.calls.map(([action]) => action), ['sync', 'search', 'analysis']);
+});
+
+test('a card press starts work without waiting for the next poll tick', async () => {
+  const h = harness();
+  await h.engine.tick();
+  h.engine.enqueueCardAction(h.event('start'));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(h.calls.map(([action]) => action), ['sync', 'search', 'analysis']);
+});
+
 test('cancel closes the card and invalidates later clicks', async () => {
   const h = harness();
   await h.engine.tick();

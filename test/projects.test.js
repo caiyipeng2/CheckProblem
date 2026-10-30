@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 
 import * as projects from '../src/projects.js';
-const { normalizeProjects, validateBranch, selectProject, listRemoteBranches, syncSelectedProject } = projects;
+const { normalizeProjects, validateBranch, selectProject, listRemoteBranches, syncSelectedProject, matchProject } = projects;
 const raw = { id: 'weapon', name: 'Weapon', url: 'https://example.com/team/weapon.git' };
 const sha = 'a'.repeat(40);
 const ref = (branch) => `${sha}\trefs/heads/${branch}\n`;
@@ -224,4 +224,30 @@ test('sync must not reset a parent repository when its own .git disappears durin
   };
   await assert.rejects(syncSelectedProject({ repo, run }), /repository|service/i);
   assert.equal(fake.calls.some(({ args }) => args.includes('reset')), false);
+});
+
+const named = [
+  { id: 'weapon', name: '武器店（Idle_Outpost）' },
+  { id: 'gear', name: '齿轮 (Idle_Gear_Defence)' },
+  { id: 'digit', name: '数字门' },
+];
+
+test('a question that names a project selects it by its short name', () => {
+  assert.equal(matchProject(named, '蔡龙 玩家反馈：齿轮升到 5 级后攻击力没刷新'), 'gear');
+  assert.equal(matchProject(named, '武器店点自动上阵没反应'), 'weapon');
+});
+
+test('the repository half of a project name matches too, whatever the case', () => {
+  assert.equal(matchProject(named, 'idle_gear_defence 里金币结算不对'), 'gear');
+  assert.equal(matchProject(named, 'IDLE_OUTPOST 每日奖励未到账'), 'weapon');
+});
+
+test('a question naming no project matches none so the configured default still applies', () => {
+  assert.equal(matchProject(named, '玩家反馈：登录以后奖励没到账，uid: 16115645'), undefined);
+  assert.equal(matchProject([], '齿轮'), undefined);
+});
+
+test('when several projects are named the one mentioned first wins', () => {
+  assert.equal(matchProject(named, '齿轮和武器店都领不到每日奖励'), 'gear');
+  assert.equal(matchProject(named, '数字门先查，再看齿轮'), 'digit');
 });

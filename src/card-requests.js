@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { buildBranchOptions, buildQueryCard } from './cards.js';
+import { matchProject } from './projects.js';
 import { buildBugPayload } from './tapd.js';
 
 const REPORT_LIMIT = 20;
@@ -73,7 +74,7 @@ export function createCardRequests({ config, state, lark, listBranches, clock, s
     const job = {
       card: true, requestId: randomUUID(), revision: 0, status: 'awaiting',
       triggerMessageId, question, context, images, confirmer: null, timeoutSec: config.confirmTimeoutSec,
-      projectId: config.defaultProjectId ?? config.projects[0].id,
+      projectId: matchProject(config.projects, question) ?? config.defaultProjectId ?? config.projects[0].id,
       branch: '', branches: [], note: '',
     };
     await loadBranches(job);

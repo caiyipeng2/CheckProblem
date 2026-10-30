@@ -182,6 +182,18 @@ test('card trigger offers project and remote branches without a text confirmatio
   assert.equal(h.cards[0].card.schema, '2.0');
 });
 
+test('a question naming another project opens the card on that project and its branch', async () => {
+  const h = harness();
+  h.setBatch([message('om_gear', '蔡龙 玩家反馈：齿轮升到 5 级后面板攻击力没刷新', 20)]);
+  await h.engine.tick();
+  assert.equal(h.state.job.projectId, 'gear');
+  assert.equal(h.state.job.branch, 'develop');
+  const start = elements(h.cards[0].card).find((e) => e.name === 'start');
+  assert.deepEqual(start.behaviors[0].value, {
+    action: 'start', requestId: h.state.job.requestId, revision: 0, projectId: 'gear', branch: 'develop',
+  });
+});
+
 test('project change replaces branches and a selected branch reaches sync, search and analysis', async () => {
   const h = harness();
   await h.engine.tick();

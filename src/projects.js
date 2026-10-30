@@ -81,6 +81,24 @@ export function selectProject(config, projectId, branch) {
   return selected;
 }
 
+// Operators name the project the way they say it out loud ("齿轮"), which is
+// the short half of a configured name like "齿轮（Idle_Gear_Defence）". Matching
+// those halves lets a card open on the project the question is really about.
+export function matchProject(projects, text) {
+  if (typeof text !== 'string' || !text) return undefined;
+  const haystack = text.toLowerCase();
+  let best;
+  for (const project of projects ?? []) {
+    for (const part of String(project?.name ?? '').split(/[\s/()[\]（）【】]+/)) {
+      const token = part.toLowerCase();
+      if (token.length < 2) continue;
+      const at = haystack.indexOf(token);
+      if (at >= 0 && (!best || at < best.at)) best = { id: project.id, at };
+    }
+  }
+  return best?.id;
+}
+
 function assertOk(result, operation) {
   if (!result || result.code !== 0 || result.truncated) {
     throw new Error(`git ${operation} failed: ${(result?.stderr || result?.stdout || '').slice(0, 300)}`);

@@ -147,9 +147,9 @@ node bin/checkproblem.js --config D:\path\config.local.json
 ```jsonc
 "tapd": {
   "tokenFile": "C:/Users/EDY/.checkproblem/tapd.token",
+  "device": "线上安卓",
   "fields": {
     "versionReport": "每周迭代版本",
-    "os": "线上安卓",
     "te": "蔡逸鹏;",
     "currentOwner": "小鱼;",
     "cc": "南柯;",
@@ -159,7 +159,12 @@ node bin/checkproblem.js --config D:\path\config.local.json
   },
   "workspaces": {
     "weapon": { "workspaceId": "59180547" },
-    "digit": { "workspaceId": "52360842", "fields": { "versionReport": "版本1" } }
+    "digit": { "workspaceId": "52360842", "fields": { "versionReport": "版本1" } },
+    "gear": {
+      "workspaceId": "47943302",
+      "tokenFile": "C:/Users/EDY/.checkproblem/tapd-gear.token",
+      "fields": { "te": "刘学;", "currentOwner": "周俊;", "cc": "彭佩;" }
+    }
   }
 }
 ```
@@ -167,18 +172,20 @@ node bin/checkproblem.js --config D:\path\config.local.json
 | 键 | 说明 |
 |---|---|
 | `tapd.tokenFile` | 个人访问令牌文件的默认路径，一行纯文本；缺失或为空时启动日志会 warn，按钮仍在但每次提交都会失败 |
-| `tapd.fields` | 所有项目共用的模板字段；键名用 UI 名（`versionReport` / `os` / `te` / `currentOwner` / `cc` / `severity` / `priority` / `frequency`），未知键会在启动时直接报错 |
+| `tapd.fields` | 所有项目共用的模板字段；键名用 UI 名（`versionReport` / `te` / `currentOwner` / `cc` / `severity` / `priority` / `frequency`），未知键会在启动时直接报错 |
+| `tapd.device` | 可选，「使用机型」一行的内容。TAPD 没有这个字段（`os` 的真实标签是「操作系统」且候选值为空），所以它只作为描述正文首行输出，不进请求参数 |
 | `tapd.workspaces.<项目id>` | 该项目对应的 TAPD workspace，`workspaceId` 必填；key 必须是已配置的项目 id |
 | `...workspaces.<id>.tokenFile` | 可选，覆盖默认令牌文件：齿轮这类项目用的是另一份令牌 |
+| `...workspaces.<id>.device` | 可选，覆盖该项目的「使用机型」 |
 | `...workspaces.<id>.fields` | 可选，按项目覆盖 `tapd.fields`（例如数字门的发现版本候选只有「版本1」） |
 | `tapd.baseUrl` | 可选，只允许 `https://api.tapd.cn`，一般不写 |
 
 令牌文件按项目读取：先看 workspace 的 `tokenFile`，没有才用 `tapd.tokenFile`。服务每次提单时现读，换令牌不用重启。**令牌文件只放在仓库外，绝不提交**；路径可以出现在配置和日志里，令牌本身不会进日志、错误消息、卡片或进程参数。
 
-第一次真实提单后，必须在 TAPD 页面上逐项核对这六个字段（它们决定测试同学会不会漏看这张单）：
+第一次真实提单后，必须在 TAPD 页面上逐项核对这几项（它们决定测试同学会不会漏看这张单）：
 
 - 发现版本
-- 使用机型
+- 使用机型（描述正文首行）
 - 测试人
 - 处理人
 - 抄送人

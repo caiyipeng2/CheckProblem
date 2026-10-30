@@ -192,7 +192,7 @@ for (const [label, mutate, pattern] of [
   ['workspace id not digits', (v) => { v.tapd.workspaces.weapon.workspaceId = 'abc'; }, /workspaceId/],
   ['unknown project', (v) => { v.tapd.workspaces.nope = { workspaceId: '12345678' }; }, /no matching project/],
   ['unknown field name', (v) => { v.tapd.fields.reporter = 'x'; }, /reporter/],
-  ['over long field value', (v) => { v.tapd.fields.os = '机'.repeat(101); }, /too long/],
+  ['over long field value', (v) => { v.tapd.fields.te = '机'.repeat(101); }, /too long/],
   ['tapd without projects', (v) => { delete v.projects; }, /requires projects/],
 ]) {
   test(`tapd config rejects ${label}`, (t) => {
@@ -236,28 +236,69 @@ test('tapd config rejects keys inherited from Object.prototype', (t) => {
   }
 });
 
-test('the eight template parameters are the only accepted field names', (t) => {
+test('the seven template parameters are the only accepted field names', (t) => {
   const value = tapdBothProjects();
   value.tapd.fields = {
-    versionReport: '每周迭代版本', os: '安卓', te: '小鱼', currentOwner: '阿鱼;',
+    versionReport: '每周迭代版本', te: '小鱼', currentOwner: '阿鱼;',
     cc: 'a;b', severity: 'normal', priority: 'high', frequency: '100%',
   };
   assert.deepEqual(loadConfig(writeTapd(t, value)).tapd.workspaces.weapon.fields, {
-    version_report: '每周迭代版本', os: '安卓', te: '小鱼', current_owner: '阿鱼;',
+    version_report: '每周迭代版本', te: '小鱼', current_owner: '阿鱼;',
     cc: 'a;b', severity: 'normal', priority: 'high', frequency: '100%',
   });
 });
 
-test('a rejected tapd field names its key without echoing the value', (t) => {
+test('os is no longer a ticket field: TAPD calls it 操作系统 and has no 使用机型 field', (t) => {
   const value = tapdBothProjects();
-  const long = '机'.repeat(101);
-  value.tapd.fields.os = long;
+  value.tapd.fields.os = '线上安卓';
   let message = '';
   try {
     loadConfig(writeTapd(t, value));
   } catch (err) {
     message = err.message;
   }
-  assert.match(message, /tapd\.fields\.os/);
+  assert.match(message, /tapd\.fields has unknown field os$/, 'the old key fails loudly instead of filing nothing');
+});
+
+test('device is inherited from tapd and may be overridden per workspace', (t) => {
+  const value = tapdBothProjects();
+  value.tapd.device = '线上安卓';
+  value.tapd.workspaces.gear = { ...value.tapd.workspaces.gear, device: '线上iOS' };
+  const config = loadConfig(writeTapd(t, value));
+  assert.equal(config.tapd.workspaces.weapon.device, '线上安卓');
+  assert.equal(config.tapd.workspaces.gear.device, '线上iOS');
+  assert.equal(config.tapd.workspaces.weapon.fields.os, undefined, 'device never becomes a ticket parameter');
+});
+
+test('a workspace without any device loads as absent', (t) => {
+  const config = loadConfig(writeTapd(t, tapdBothProjects()));
+  assert.equal(config.tapd.workspaces.weapon.device, undefined);
+});
+
+test('a non-string device is refused instead of stringified', (t) => {
+  for (const bad of [null, 42, { x: 1 }]) {
+    const value = tapdBothProjects();
+    value.tapd.device = bad;
+    let message = '';
+    try {
+      loadConfig(writeTapd(t, value));
+    } catch (err) {
+      message = err.message;
+    }
+    assert.match(message, /tapd\.device must be a string/, JSON.stringify(bad));
+  }
+});
+
+test('a rejected tapd field names its key without echoing the value', (t) => {
+  const value = tapdBothProjects();
+  const long = '机'.repeat(101);
+  value.tapd.fields.te = long;
+  let message = '';
+  try {
+    loadConfig(writeTapd(t, value));
+  } catch (err) {
+    message = err.message;
+  }
+  assert.match(message, /tapd\.fields\.te/);
   assert.equal(message.includes('机'.repeat(5)), false);
 });

@@ -145,6 +145,7 @@ export function buildBugPayload({ report, entry, projects = [] }) {
   const question = questionSection(report.question);
   const images = Array.isArray(report.images) ? report.images : [];
   const body = [
+    ...(entry.device ? [`使用机型：${line(entry.device)}`, ''] : []),
     '【问题描述】', line(question), '',
     '【操作步骤】', ...steps(parts.repro).map(line), '',
     '【预期结果】', '正常', '',

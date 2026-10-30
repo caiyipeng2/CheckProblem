@@ -23,9 +23,9 @@
   ],
   "tapd": {
     "tokenFile": "C:/Users/<你>/.checkproblem/tapd.token",
+    "device": "线上安卓",
     "fields": {
       "versionReport": "每周迭代版本",
-      "os": "线上安卓",
       "te": "蔡逸鹏;",
       "currentOwner": "小鱼;",
       "cc": "南柯;",
@@ -35,7 +35,12 @@
     },
     "workspaces": {
       "weapon": { "workspaceId": "59180547" },
-      "digit": { "workspaceId": "52360842", "fields": { "versionReport": "版本1" } }
+      "digit": { "workspaceId": "52360842", "fields": { "versionReport": "版本1" } },
+      "gear": {
+        "workspaceId": "47943302",
+        "tokenFile": "C:/Users/<你>/.checkproblem/tapd-gear.token",
+        "fields": { "te": "刘学;", "currentOwner": "周俊;", "cc": "彭佩;" }
+      }
     }
   }
 }

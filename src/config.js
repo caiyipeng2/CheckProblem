@@ -40,7 +40,6 @@ const DEFAULTS = {
 // the eight names below.
 const TAPD_FIELDS = {
   versionReport: 'version_report',
-  os: 'os',
   te: 'te',
   currentOwner: 'current_owner',
   cc: 'cc',
@@ -50,6 +49,17 @@ const TAPD_FIELDS = {
 };
 const TAPD_VALUE_LIMIT = 100;
 const WORKSPACE_ID = /^\d{6,20}$/;
+
+// `device` is deliberately not a ticket field: TAPD's `os` is 操作系统 with an empty
+// candidate list, and neither game workspace has any 机型/设备 field at all, so the
+// team's 使用机型 only survives as a line of the description (src/tapd.js).
+function tapdDevice(value, where) {
+  if (value === undefined) return undefined;
+  if (typeof value !== 'string') throw new Error(`config: ${where} must be a string`);
+  const text = value.trim();
+  if (text.length > TAPD_VALUE_LIMIT) throw new Error(`config: ${where} is too long`);
+  return text === '' ? undefined : text;
+}
 
 function tapdFields(raw, where) {
   const out = {};
@@ -77,6 +87,7 @@ export function normalizeTapd(raw, projects) {
   const baseUrl = raw.baseUrl === undefined ? 'https://api.tapd.cn' : String(raw.baseUrl);
   if (!/^https:\/\/api\.tapd\.cn(\/.*)?$/.test(baseUrl)) throw new Error('config: tapd.baseUrl must be https://api.tapd.cn');
   const base = tapdFields(raw.fields, 'tapd.fields');
+  const baseDevice = tapdDevice(raw.device, 'tapd.device');
   const ids = new Set(projects.map((project) => project.id));
   const workspaces = {};
   for (const [projectId, value] of Object.entries(raw.workspaces ?? {})) {
@@ -94,7 +105,8 @@ export function normalizeTapd(raw, projects) {
     }
     const override = rawOverride === undefined ? tokenFile : rawOverride.trim();
     if (override === '') throw new Error(`config: tapd.workspaces.${projectId}.tokenFile is empty`);
-    workspaces[projectId] = { workspaceId, tokenFile: override, fields: { ...base, ...tapdFields(value?.fields, `tapd.workspaces.${projectId}.fields`) } };
+    const device = value?.device === undefined ? baseDevice : tapdDevice(value.device, `tapd.workspaces.${projectId}.device`);
+    workspaces[projectId] = { workspaceId, tokenFile: override, device, fields: { ...base, ...tapdFields(value?.fields, `tapd.workspaces.${projectId}.fields`) } };
   }
   return { baseUrl, tokenFile, workspaces };
 }

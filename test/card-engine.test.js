@@ -604,7 +604,7 @@ test('at most four screenshots are attached and a failed download never blocks t
 const TAPD_CONFIG = {
   baseUrl: 'https://api.tapd.cn',
   tokenFile: 'C:/secrets/tapd.token',
-  workspaces: { weapon: { workspaceId: '59180547', tokenFile: 'C:/secrets/tapd.token', fields: { current_owner: '小鱼;' } } },
+  workspaces: { weapon: { workspaceId: '59180547', tokenFile: 'C:/secrets/tapd.token', device: '线上安卓', fields: { current_owner: '小鱼;' } } },
 };
 const FULL_ANALYSIS = [
   '【结论】配置缺失：奖励表没有该档位',
@@ -880,6 +880,10 @@ test('the running job keeps the raw analysis so the ticket can reuse it', async 
   await h.engine.tick();
   assert.equal(seen.length, 1);
   assert.match(seen[0].description, /【操作步骤】<br \/>1\. 打开铁匠铺 2\. 点击锻造<br \/>/);
+  assert.ok(
+    seen[0].description.startsWith('使用机型：线上安卓<br /><br />'),
+    'the workspace device from config reaches the ticket body',
+  );
 });
 
 test('no TAPD client means no submit path at all', async () => {

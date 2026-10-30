@@ -23,7 +23,8 @@ const report = {
 const entry = {
   workspaceId: '59180547',
   tokenFile: 'C:/secrets/tapd.token',
-  fields: { version_report: '每周迭代版本', os: '线上安卓', te: '蔡逸鹏;', current_owner: '小鱼;', cc: '南柯;' },
+  device: '线上安卓',
+  fields: { version_report: '每周迭代版本', te: '蔡逸鹏;', current_owner: '小鱼;', cc: '南柯;' },
 };
 const projects = [{ id: 'weapon', name: '武器店' }];
 
@@ -66,7 +67,7 @@ test('payload title cuts at the first sentence mark and caps at 100 chars', () =
 test('payload description follows the team ticket template', () => {
   const description = buildBugPayload({ report, entry, projects }).description;
   assert.ok(
-    description.startsWith('【问题描述】<br />uid：27019278 锻造按钮不能点击<br /><br />【操作步骤】<br />'),
+    description.startsWith('使用机型：线上安卓<br /><br />【问题描述】<br />uid：27019278 锻造按钮不能点击<br /><br />【操作步骤】<br />'),
     'TAPD renders the description as HTML, so every template line needs a real break',
   );
   assert.match(description, /【操作步骤】<br \/>1\. 进入铁匠铺<br \/>2\. 点击锻造按钮<br \/><br \/>/);
@@ -94,6 +95,14 @@ test('group text is escaped, not injected into the ticket', () => {
   assert.ok(!description.includes('<script>'), 'no raw tag from group text reaches TAPD');
   assert.ok(description.includes('&lt;script&gt;alert(1)&lt;/script&gt; &amp; 存档'));
   assert.ok(description.includes('由 &lt;b&gt;蔡逸鹏&lt;/b&gt; 确认'));
+});
+
+test('使用机型 is a description line, not a ticket parameter', () => {
+  const payload = buildBugPayload({ report, entry, projects });
+  assert.ok(payload.description.startsWith('使用机型：线上安卓<br /><br />'));
+  assert.equal(payload.device, undefined, 'the config key never rides along into the form body');
+  const without = buildBugPayload({ report, entry: { ...entry, device: undefined }, projects });
+  assert.ok(without.description.startsWith('【问题描述】'), 'no device configured, no line invented');
 });
 
 test('payload falls back when the model gave no repro', () => {

@@ -257,6 +257,48 @@ test('foreign, stale, malformed and unknown actions never start a query', async 
   assert.equal(h.state.job.status, 'awaiting');
 });
 
+test('a start press from a card that has not refreshed yet still starts the same selection', async () => {
+  const h = harness();
+  await h.engine.tick();
+  const stale = { ...h.event('start'), action_value: JSON.stringify({
+    action: 'start', requestId: h.state.job.requestId, revision: h.state.job.revision,
+    projectId: 'weapon', branch: 'master',
+  }) };
+  h.engine.enqueueCardAction(h.event('project', 'weapon'));
+  await h.engine.tick();
+  assert.equal(h.state.job.revision, 1, 're-picking the same project still bumps the revision');
+  h.engine.enqueueCardAction(stale);
+  await h.engine.tick();
+  assert.deepEqual(h.calls.map(([action]) => action), ['sync', 'search', 'analysis']);
+});
+
+test('a start press naming a selection the card no longer shows is refused', async () => {
+  const h = harness();
+  await h.engine.tick();
+  const stale = { ...h.event('start'), action_value: JSON.stringify({
+    action: 'start', requestId: h.state.job.requestId, revision: h.state.job.revision,
+    projectId: 'weapon', branch: 'master',
+  }) };
+  h.engine.enqueueCardAction(h.event('project', 'gear'));
+  await h.engine.tick();
+  h.engine.enqueueCardAction(stale);
+  await h.engine.tick();
+  assert.equal(h.calls.length, 0);
+  assert.equal(h.state.job.status, 'awaiting');
+});
+
+test('the card says 查询中 before the confirmer name is looked up', async () => {
+  const order = [];
+  const h = harness({ lark: {
+    getSenderName: async () => { order.push('name'); return '确认人'; },
+    updateCard: async (id, card) => { order.push(card.header.subtitle.content); },
+  } });
+  await h.engine.tick();
+  h.engine.enqueueCardAction(h.event('start'));
+  await h.engine.tick();
+  assert.deepEqual(order.slice(0, 2), ['查询中', 'name']);
+});
+
 test('cancel closes the card and invalidates later clicks', async () => {
   const h = harness();
   await h.engine.tick();

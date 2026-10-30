@@ -23,8 +23,19 @@ test('untrusted question remains plain text, never markup or an action', () => {
   assert.ok(nodes.some((n) => n.tag === 'plain_text' && n.content === job.question));
   assert.ok(!nodes.some((n) => n.tag === 'markdown' && n.content.includes('<at')));
   for (const n of nodes.filter((n) => n.behaviors)) {
-    assert.deepEqual(n.behaviors[0].value, { requestId: 'request-1', revision: 3, action: n.name });
+    const selection = n.name === 'start' ? { projectId: 'weapon', branch: 'master' } : {};
+    assert.deepEqual(n.behaviors[0].value, {
+      requestId: 'request-1', revision: 3, action: n.name, ...selection,
+    });
   }
+});
+
+test('the start button carries the selection so a not-yet-refreshed card can be trusted', () => {
+  const nodes = walk(buildQueryCard({ job, projects }));
+  const start = nodes.find((node) => node.tag === 'button' && node.name === 'start');
+  assert.deepEqual(start.behaviors[0].value, {
+    requestId: 'request-1', revision: 3, action: 'start', projectId: 'weapon', branch: 'master',
+  });
 });
 
 test('terminal cards disable all controls', () => {

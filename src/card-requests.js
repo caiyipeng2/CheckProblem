@@ -131,6 +131,7 @@ export function createCardRequests({ config, state, lark, listBranches, clock, s
     if (!['project', 'branch', 'start', 'cancel'].includes(action.action) || cardEvent.action_tag !== expectedTag) return false;
     if (action.requestId !== job.requestId) return false;
     queue.push({ action: action.action, requestId: action.requestId, revision: action.revision,
+      projectId: action.projectId, branch: action.branch,
       option: cardEvent.option, operatorId: cardEvent.operator_id });
     return true;
   }
@@ -210,8 +211,16 @@ export function createCardRequests({ config, state, lark, listBranches, clock, s
       if (!job?.card || job.status !== 'awaiting' || job.requestId !== event.requestId) continue;
       if (clock() > job.expiresAt) continue;
       if (job.revision !== event.revision) {
-        log?.warn?.('ignoring an action on an outdated card revision');
-        continue;
+        // The card on screen may not have refreshed yet, so its revision is
+        // behind. A start that names the project and branch still shown is the
+        // press the operator meant; anything else would reinterpret a control
+        // that has since moved.
+        const sameSelection = event.action === 'start'
+          && event.projectId === job.projectId && event.branch === job.branch;
+        if (!sameSelection) {
+          log?.warn?.('ignoring an action on an outdated card revision');
+          continue;
+        }
       }
       if (event.action === 'project') {
         if (!config.projects.some((p) => p.id === event.option)) continue;

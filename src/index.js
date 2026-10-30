@@ -96,13 +96,16 @@ export function createEngine({ config, lark, syncRepo, runAnalysis, state, clock
     const imagesDir = imageDirFor(config.paths.imagesDir, triggerMessageId);
     job.status = 'running';
     saveState(state);
-    const confirmer = await confirmerFor(msg);
-    job.confirmer = confirmer;
-    saveState(state);
-    log?.info?.(`confirmed by ${confirmer}, question=${job.question}`);
 
     try {
+      // Press-to-feedback before anything slow: the operator sees 查询中 while
+      // the confirmer name and the newest remote commit are still being fetched.
       if (job.card) await cards.update(job);
+      const confirmer = await confirmerFor(msg);
+      job.confirmer = confirmer;
+      saveState(state);
+      log?.info?.(`confirmed by ${confirmer}, question=${job.question}`);
+
       const { provenance } = await syncRepo(repo);
       job.provenance = provenance;
       // The clone moved, so the search runs after the sync. A failed search only

@@ -33,8 +33,8 @@ export function buildBranchOptions(job) {
 
 export function buildQueryCard({ job, projects, tapd = null }) {
   const active = job.status === 'awaiting';
-  const callback = (action) => [{
-    type: 'callback', value: { requestId: job.requestId, revision: job.revision, action },
+  const callback = (action, extra) => [{
+    type: 'callback', value: { requestId: job.requestId, revision: job.revision, action, ...extra },
   }];
   const selectedProject = projects.find((p) => p.id === job.projectId);
   const projectSelect = {
@@ -108,7 +108,10 @@ export function buildQueryCard({ job, projects, tapd = null }) {
         row([
           column([{
             tag: 'button', name: 'start', text: plain('开始查询'), type: 'primary_filled',
-            width: 'fill', disabled: !active || !job.branch, behaviors: callback('start'),
+            // A card that has not refreshed yet still carries the selection it
+            // shows, so the press is trustworthy even when its revision is old.
+            width: 'fill', disabled: !active || !job.branch,
+            behaviors: callback('start', { projectId: job.projectId, branch: job.branch }),
           }]),
           column([{
             tag: 'button', name: 'cancel', text: plain('取消'), type: 'default',

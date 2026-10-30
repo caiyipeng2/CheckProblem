@@ -210,6 +210,13 @@ node bin/checkproblem.js --config D:\path\config.local.json
 
 通用约束：
 
+- 卡片模式的项目目录（`<配置目录>/repo/cards/<项目id>`）只能由服务派生，配置里写 `dir`/`mode` 会直接报错。首次接入大仓库（Unity 项目对象库可达 2G+）时，可以先借本机已有的克隆做对象库，只从远端补增量：
+
+  ```bash
+  git clone --reference <开发机上的同一仓库路径> --branch <分支> <项目 url> <配置目录>/repo/cards/<项目id>
+  ```
+
+  这样服务侧仍是标准 `clone` 模式（照常 `fetch` + `reset --hard`，仍强制对齐最新远端），`.git` 只存借来的对象之外的一小层。代价是这份克隆依赖被引用仓库的对象库：如果那边 `gc`/删除或挪走，服务会在同步时报 git 对象缺失（不会静默读旧代码），恢复办法是删掉该目录重新克隆。
 - 服务从不 push，也不会碰 `repo.dir` 之外的项目目录（运行时另写 `logs/` 和 `state/`）。
 - 分析引擎本身不写仓库：`codex` 以 `-s read-only` 运行，`kind: chat` 的引擎只收到检索出的代码片段文本。
 - `repo.dir` 必须是一个 git 仓库；不是时启动后第一次分析会报 `not a git repository: …`。

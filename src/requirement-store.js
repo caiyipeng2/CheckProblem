@@ -148,6 +148,9 @@ export function openRequirementStore(file, { io = {} } = {}) {
       const next = structuredClone(state);
       const result = fn(next);
       if (result !== null && result !== undefined && typeof result.then === 'function') {
+        // Consume the thenable's settlement so a rejecting async fn cannot
+        // surface as an unhandled rejection after we refuse its result.
+        void Promise.resolve(result).catch(() => {});
         throw new Error(TRANSACTION_NOT_SYNC);
       }
       // Publish exactly what the file holds; non-JSON values would otherwise

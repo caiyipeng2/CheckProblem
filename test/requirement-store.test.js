@@ -472,6 +472,26 @@ test('an async transaction function is rejected without publishing', async (t) =
   assert.deepEqual(store.list(), []);
 });
 
+test('a rejecting async transaction function leaves no unhandled rejection', async (t) => {
+  const store = openRequirementStore(tmpFile(t));
+  t.after(() => store.close());
+
+  const unhandled = [];
+  const onUnhandled = (reason) => unhandled.push(reason);
+  process.on('unhandledRejection', onUnhandled);
+  t.after(() => process.off('unhandledRejection', onUnhandled));
+
+  await assert.rejects(
+    store.transaction(async () => {
+      throw new Error('boom');
+    }),
+    { message: 'TRANSACTION_NOT_SYNC' },
+  );
+  // Give the runtime a macrotask to emit unhandledRejection for a leaked promise.
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.deepEqual(unhandled, []);
+});
+
 test('non-JSON values are normalized before memory and disk are published', async (t) => {
   const file = tmpFile(t);
   const store = openRequirementStore(file);

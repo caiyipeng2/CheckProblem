@@ -1,12 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  closeSync,
   existsSync,
   fsyncSync,
   mkdirSync,
   mkdtempSync,
-  openSync,
+  readdirSync,
   readFileSync,
   renameSync,
   rmSync,
@@ -44,6 +43,22 @@ function makeRequest(id) {
   };
 }
 
+function makeBatch() {
+  return {
+    id: 'batch_1',
+    requestId: 'req_1',
+    draftVersion: 3,
+    workspaceId: 'ws_weapon',
+    documentId: 'doc_req_1',
+    sourceFingerprint: 'blocks:1-4',
+    parent: { mode: 'create', storyId: null, fields: { name: 'Parent' } },
+    stories: [{ key: 'M02', fields: { name: 'M02' }, dependencies: [] }],
+    actorId: 'ou_reviewer',
+    approvedAt: '2026-10-30T00:00:00.000Z',
+    payloadHash: 'sha256:payload',
+  };
+}
+
 function writeLedger(file, value) {
   mkdirSync(dirname(file), { recursive: true });
   writeFileSync(file, JSON.stringify(value));
@@ -78,6 +93,35 @@ test('a request saved by transaction survives a reopen', async (t) => {
   t.after(() => reopened.close());
   assert.deepEqual(reopened.get('req_1'), makeRequest('req_1'));
   assert.deepEqual(reopened.list(), [makeRequest('req_1')]);
+});
+
+test('an unknown submission item survives a reopen unchanged', async (t) => {
+  const file = tmpFile(t);
+  const store = openRequirementStore(file);
+  const request = makeRequest('req_1');
+  request.submissions = [
+    {
+      batch: makeBatch(),
+      status: 'unknown',
+      items: [
+        {
+          key: 'M02',
+          marker: 'marker-m02',
+          payloadHash: 'sha256:item',
+          status: 'unknown',
+          errorCode: 'UNKNOWN',
+        },
+      ],
+    },
+  ];
+  await store.transaction((next) => {
+    next.requests.req_1 = request;
+  });
+  await store.close();
+
+  const reopened = openRequirementStore(file);
+  t.after(() => reopened.close());
+  assert.deepEqual(reopened.get('req_1').submissions, request.submissions);
 });
 
 test('transaction returns fn result and persists draft mutations', async (t) => {
@@ -173,6 +217,108 @@ test('structurally malformed ledgers are corrupt', (t) => {
       `expected LEDGER_CORRUPT for ${JSON.stringify(ledger)}`,
     );
   }
+});
+
+test('requests without a valid envelope are corrupt on open', (t) => {
+  const base = makeRequest('req_1');
+  const invalid = [
+    ['empty request', {}],
+    ['non-string id', { ...base, id: 7 }],
+    ['id/key mismatch', { ...base, id: 'req_2' }],
+    ['missing chatId', { ...base, chatId: undefined }],
+    ['empty chatId', { ...base, chatId: '' }],
+    ['missing status', { ...base, status: undefined }],
+    ['empty status', { ...base, status: '' }],
+    ['submissions not an array', { ...base, submissions: {} }],
+    [
+      'submission missing batch',
+      { ...base, submissions: [{ status: 'pending', items: [] }] },
+    ],
+    [
+      'submission missing items',
+      { ...base, submissions: [{ batch: makeBatch(), status: 'pending' }] },
+    ],
+    [
+      'submission status empty',
+      { ...base, submissions: [{ batch: makeBatch(), status: '', items: [] }] },
+    ],
+    [
+      'item missing key',
+      {
+        ...base,
+        submissions: [
+          { batch: makeBatch(), status: 'pending', items: [{ status: 'pending' }] },
+        ],
+      },
+    ],
+    [
+      'item missing status',
+      {
+        ...base,
+        submissions: [{ batch: makeBatch(), status: 'pending', items: [{ key: 'M02' }] }],
+      },
+    ],
+  ];
+  for (const [label, request] of invalid) {
+    const file = tmpFile(t);
+    writeLedger(file, { version: 1, requests: { req_1: request } });
+    assert.throws(
+      () => openRequirementStore(file),
+      { message: 'LEDGER_CORRUPT' },
+      `expected LEDGER_CORRUPT for ${label}`,
+    );
+  }
+});
+
+test('requests without a valid envelope are rejected before every write', async (t) => {
+  const store = openRequirementStore(tmpFile(t));
+  t.after(() => store.close());
+  const mutations = [
+    (next) => {
+      const request = makeRequest('req_1');
+      delete request.chatId;
+      next.requests.req_1 = request;
+    },
+    (next) => {
+      next.requests.req_1 = { ...makeRequest('req_1'), id: 'req_2' };
+    },
+    (next) => {
+      next.requests.req_1 = { ...makeRequest('req_1'), submissions: {} };
+    },
+    (next) => {
+      next.requests.req_1 = {
+        ...makeRequest('req_1'),
+        submissions: [{ batch: makeBatch(), status: 'pending' }],
+      };
+    },
+  ];
+  for (const mutate of mutations) {
+    await assert.rejects(store.transaction(mutate), { message: 'LEDGER_CORRUPT' });
+  }
+  assert.deepEqual(store.list(), []);
+});
+
+test('workflow status values are not enumerated by the ledger', async (t) => {
+  const file = tmpFile(t);
+  const store = openRequirementStore(file);
+  const request = makeRequest('req_1');
+  request.status = 'future_request_status';
+  request.submissions = [
+    {
+      batch: makeBatch(),
+      status: 'future_submission_status',
+      items: [{ key: 'M02', status: 'future_item_status' }],
+    },
+  ];
+  await store.transaction((next) => {
+    next.requests.req_1 = request;
+  });
+  await store.close();
+
+  const reopened = openRequirementStore(file);
+  t.after(() => reopened.close());
+  assert.deepEqual(reopened.get('req_1').submissions, request.submissions);
+  assert.equal(reopened.get('req_1').status, 'future_request_status');
 });
 
 test('a failed rename keeps memory and disk on the previous state and the queue recovers', async (t) => {
@@ -298,31 +444,85 @@ test('transaction after close rejects with STORE_CLOSED', async (t) => {
   await assert.rejects(store.transaction(() => {}), { message: 'STORE_CLOSED' });
 });
 
-test('close waits for an already queued transaction to persist', async (t) => {
-  const file = tmpFile(t);
-  const store = openRequirementStore(file);
+test('close waits for an already queued transaction to complete', async (t) => {
+  const store = openRequirementStore(tmpFile(t));
   const pending = store.transaction((next) => {
     next.requests.req_1 = makeRequest('req_1');
   });
-  await Promise.all([pending, store.close()]);
+  const closing = store.close();
+  const first = await Promise.race([
+    pending.then(() => 'transaction'),
+    closing.then(() => 'close'),
+  ]);
+  assert.equal(first, 'transaction');
+  await closing;
+});
+
+test('an async transaction function is rejected without publishing', async (t) => {
+  const store = openRequirementStore(tmpFile(t));
+  t.after(() => store.close());
+
+  await assert.rejects(
+    store.transaction(async (next) => {
+      next.requests.req_1 = makeRequest('req_1');
+    }),
+    { message: 'TRANSACTION_NOT_SYNC' },
+  );
+  assert.equal(store.get('req_1'), undefined);
+  assert.deepEqual(store.list(), []);
+});
+
+test('non-JSON values are normalized before memory and disk are published', async (t) => {
+  const file = tmpFile(t);
+  const store = openRequirementStore(file);
+  await store.transaction((next) => {
+    const request = makeRequest('req_1');
+    request.draft.createdAt = new Date('2026-10-30T01:02:03.000Z');
+    next.requests.req_1 = request;
+  });
+  assert.equal(typeof store.get('req_1').draft.createdAt, 'string');
+  assert.equal(store.get('req_1').draft.createdAt, '2026-10-30T01:02:03.000Z');
+  await store.close();
 
   const reopened = openRequirementStore(file);
   t.after(() => reopened.close());
-  assert.ok(reopened.get('req_1'));
+  assert.deepEqual(store.get('req_1'), reopened.get('req_1'));
 });
 
-test('atomic writes rename a unique temp path onto the ledger', async (t) => {
+test('a failed rename removes its temp file', async (t) => {
   const file = tmpFile(t);
-  const renames = [];
   const store = openRequirementStore(file, {
     io: {
-      renameSync(from, to) {
-        renames.push([from, to]);
-        return renameSync(from, to);
+      renameSync() {
+        throw new Error('rename failed');
       },
     },
   });
   t.after(() => store.close());
+
+  await assert.rejects(
+    store.transaction((next) => {
+      next.requests.req_1 = makeRequest('req_1');
+    }),
+    { message: 'rename failed' },
+  );
+  assert.deepEqual(readdirSync(dirname(file)), []);
+});
+
+test('atomic writes use distinct temp paths across stores and writes', async (t) => {
+  const file = tmpFile(t);
+  const otherFile = join(dirname(dirname(file)), 'other', 'ledger.json');
+  const renames = [];
+  const io = {
+    renameSync(from, to) {
+      renames.push([from, to]);
+      return renameSync(from, to);
+    },
+  };
+  const store = openRequirementStore(file, { io });
+  const other = openRequirementStore(otherFile, { io });
+  t.after(() => store.close());
+  t.after(() => other.close());
 
   await store.transaction((next) => {
     next.requests.req_1 = makeRequest('req_1');
@@ -330,15 +530,17 @@ test('atomic writes rename a unique temp path onto the ledger', async (t) => {
   await store.transaction((next) => {
     next.requests.req_2 = makeRequest('req_2');
   });
+  await other.transaction((next) => {
+    next.requests.req_3 = makeRequest('req_3');
+  });
 
-  assert.equal(renames.length, 2);
+  assert.equal(renames.length, 3);
   for (const [from, to] of renames) {
-    assert.equal(to, file);
-    assert.notEqual(from, file);
-    assert.equal(dirname(from), dirname(file));
+    assert.notEqual(from, to);
+    assert.equal(dirname(from), dirname(to));
     assert.equal(existsSync(from), false);
   }
-  assert.notEqual(renames[0][0], renames[1][0]);
+  assert.equal(new Set(renames.map(([from]) => from)).size, 3);
 });
 
 test('non-ENOENT read errors propagate unchanged', (t) => {
@@ -351,18 +553,18 @@ test('non-ENOENT read errors propagate unchanged', (t) => {
 
 // Keep the injectable-I/O defaults honest: a store opened without overrides
 // must use the real fs primitives listed in the contract.
-test('default io uses fsync and fd-based writes', async (t) => {
+test('default io fsyncs the temp file before the rename', async (t) => {
   const file = tmpFile(t);
   const calls = [];
   const store = openRequirementStore(file, {
     io: {
-      openSync(path, flags) {
-        calls.push(['open', path, flags]);
-        return openSync(path, flags);
+      fsyncSync(fd) {
+        calls.push('fsync');
+        return fsyncSync(fd);
       },
-      closeSync(fd) {
-        calls.push(['close']);
-        return closeSync(fd);
+      renameSync(from, to) {
+        calls.push('rename');
+        return renameSync(from, to);
       },
     },
   });
@@ -370,7 +572,6 @@ test('default io uses fsync and fd-based writes', async (t) => {
   await store.transaction((next) => {
     next.requests.req_1 = makeRequest('req_1');
   });
-  assert.deepEqual(calls.map(([name]) => name), ['open', 'close']);
-  assert.equal(calls[0][2], 'w');
+  assert.deepEqual(calls, ['fsync', 'rename']);
   assert.ok(existsSync(file));
 });

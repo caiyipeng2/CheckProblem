@@ -10,20 +10,46 @@ import {
   openSync as fsOpenSync,
   readFileSync as fsReadFileSync,
   renameSync as fsRenameSync,
+  unlinkSync as fsUnlinkSync,
   writeFileSync as fsWriteFileSync,
 } from 'node:fs';
+import { randomUUID } from 'node:crypto';
 import { dirname } from 'node:path';
 
 const LEDGER_CORRUPT = 'LEDGER_CORRUPT';
 const LEDGER_UNSUPPORTED = 'LEDGER_UNSUPPORTED';
 const STORE_CLOSED = 'STORE_CLOSED';
+const TRANSACTION_NOT_SYNC = 'TRANSACTION_NOT_SYNC';
 
 function isPlainObject(value) {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
 
-// Deliberately shallow: request and story internals are validated by the draft
-// layer. Here only the container must be trustworthy before it reaches memory.
+function nonEmptyString(value) {
+  return typeof value === 'string' && value.length > 0;
+}
+
+// Status enums belong to the workflow layers; the ledger only guarantees the
+// shape Task 8 reads directly (request.envelope and submission.items).
+function validateRequest(id, request) {
+  if (!isPlainObject(request)) throw new Error(LEDGER_CORRUPT);
+  if (!nonEmptyString(request.id) || request.id !== id) throw new Error(LEDGER_CORRUPT);
+  if (!nonEmptyString(request.chatId)) throw new Error(LEDGER_CORRUPT);
+  if (!nonEmptyString(request.status)) throw new Error(LEDGER_CORRUPT);
+  if (!Array.isArray(request.submissions)) throw new Error(LEDGER_CORRUPT);
+  for (const submission of request.submissions) {
+    if (!isPlainObject(submission)) throw new Error(LEDGER_CORRUPT);
+    if (!isPlainObject(submission.batch)) throw new Error(LEDGER_CORRUPT);
+    if (!nonEmptyString(submission.status)) throw new Error(LEDGER_CORRUPT);
+    if (!Array.isArray(submission.items)) throw new Error(LEDGER_CORRUPT);
+    for (const item of submission.items) {
+      if (!isPlainObject(item)) throw new Error(LEDGER_CORRUPT);
+      if (!nonEmptyString(item.key)) throw new Error(LEDGER_CORRUPT);
+      if (!nonEmptyString(item.status)) throw new Error(LEDGER_CORRUPT);
+    }
+  }
+}
+
 function validateLedger(ledger) {
   if (!isPlainObject(ledger)) throw new Error(LEDGER_CORRUPT);
   if (typeof ledger.version === 'number' && ledger.version !== 1) {
@@ -33,7 +59,7 @@ function validateLedger(ledger) {
   if (ledger.version !== 1) throw new Error(LEDGER_CORRUPT);
   if (!isPlainObject(ledger.requests)) throw new Error(LEDGER_CORRUPT);
   for (const [id, request] of Object.entries(ledger.requests)) {
-    if (id.length === 0 || !isPlainObject(request)) throw new Error(LEDGER_CORRUPT);
+    validateRequest(id, request);
   }
 }
 
@@ -46,13 +72,13 @@ export function openRequirementStore(file, { io = {} } = {}) {
     fsyncSync: fsFsyncSync,
     closeSync: fsCloseSync,
     renameSync: fsRenameSync,
+    unlinkSync: fsUnlinkSync,
     ...io,
   };
 
   let state = loadLedger();
   let closed = false;
   let queue = Promise.resolve();
-  let tempSeq = 0;
 
   function loadLedger() {
     let raw;
@@ -75,18 +101,34 @@ export function openRequirementStore(file, { io = {} } = {}) {
 
   function writeAtomic(ledger) {
     fs.mkdirSync(dirname(file), { recursive: true });
-    tempSeq += 1;
-    const tmp = `${file}.${process.pid}.${tempSeq}.tmp`;
-    const fd = fs.openSync(tmp, 'w');
+    const tmp = `${file}.${process.pid}.${randomUUID()}.tmp`;
+    let fd;
     try {
+      fd = fs.openSync(tmp, 'w');
       fs.writeFileSync(fd, JSON.stringify(ledger, null, 2));
       fs.fsyncSync(fd);
-    } finally {
       fs.closeSync(fd);
+      fd = undefined;
+      // Memory is published only after this rename succeeds; on Windows this is
+      // atomic replacement, not a cross-power-loss database guarantee.
+      fs.renameSync(tmp, file);
+    } catch (error) {
+      if (fd !== undefined) {
+        // Best effort: a failed close leaves the handle unusable anyway.
+        try {
+          fs.closeSync(fd);
+        } catch {
+          // ignore
+        }
+      }
+      // Best effort: never accumulate full ledger copies after a failed write.
+      try {
+        fs.unlinkSync(tmp);
+      } catch {
+        // ignore
+      }
+      throw error;
     }
-    // Memory is published only after this rename succeeds; on Windows this is
-    // atomic replacement, not a cross-power-loss database guarantee.
-    fs.renameSync(tmp, file);
   }
 
   function get(id) {
@@ -105,9 +147,20 @@ export function openRequirementStore(file, { io = {} } = {}) {
     const run = async () => {
       const next = structuredClone(state);
       const result = fn(next);
-      validateLedger(next);
-      writeAtomic(next);
-      state = next;
+      if (result !== null && result !== undefined && typeof result.then === 'function') {
+        throw new Error(TRANSACTION_NOT_SYNC);
+      }
+      // Publish exactly what the file holds; non-JSON values would otherwise
+      // diverge between memory and the next reopen.
+      let normalized;
+      try {
+        normalized = JSON.parse(JSON.stringify(next));
+      } catch {
+        throw new Error(LEDGER_CORRUPT);
+      }
+      validateLedger(normalized);
+      writeAtomic(normalized);
+      state = normalized;
       return result;
     };
 

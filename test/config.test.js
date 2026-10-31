@@ -302,3 +302,57 @@ test('a rejected tapd field names its key without echoing the value', (t) => {
   assert.match(message, /tapd\.fields\.te/);
   assert.equal(message.includes('机'.repeat(5)), false);
 });
+
+function requirementConfig(t, includeBlock = true) {
+  const dir = mkdtempSync(join(tmpdir(), 'cfg-requirements-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const file = join(dir, 'config.json');
+  const value = {
+    chatId: 'oc_x',
+    selfOpenId: 'ou_x',
+    projects: [{ id: 'weapon', name: '武器店', url: 'https://example.com/w.git' }],
+    tapd: { tokenFile: 'C:/secrets/tapd.token', workspaces: { weapon: { workspaceId: '59180547' } } },
+    analyze: {
+      attempts: [{ label: 'chat', model: 'vision', apiKeyFile: 'C:/secrets/chat.key', apiKeyEnv: '', timeoutSec: 120 }],
+    },
+    requirements: {
+      allowedSenders: ['ou_test'],
+      reviewers: ['ou_reviewer'],
+      documentHosts: ['hellowd.feishu.cn'],
+      modelAttempt: 0,
+      projects: {
+        weapon: {
+          parentTypeId: 'parent-type',
+          childTypeId: 'child-type',
+          templateId: 'template',
+          owners: ['owner'],
+          iterationIds: ['0'],
+        },
+      },
+    },
+  };
+  if (!includeBlock) delete value.requirements;
+  writeFileSync(file, JSON.stringify(value));
+  return { dir, file };
+}
+
+test('loadConfig normalizes a requirements block and derives its paths', (t) => {
+  const { dir, file } = requirementConfig(t);
+  const config = loadConfig(file);
+  assert.equal(Object.hasOwn(config, 'requirements'), true);
+  assert.deepEqual(config.requirements.paths, {
+    stateFile: join(dir, 'state', 'requirements.json'),
+    assetsDir: join(dir, 'state', 'requirement-assets'),
+  });
+  assert.equal(config.requirements.modelAttempt, 0);
+  assert.equal(config.requirements.attempt, config.analyze.attempts[0]);
+  assert.deepEqual(config.requirements.documentHosts, ['hellowd.feishu.cn']);
+  assert.deepEqual(config.requirements.projects.weapon.owners, ['owner']);
+});
+
+test('a config without a requirements block does not enable the feature', (t) => {
+  const { file } = requirementConfig(t, false);
+  const config = loadConfig(file);
+  assert.equal(Object.hasOwn(config, 'requirements'), false);
+  assert.equal(config.requirements, undefined);
+});

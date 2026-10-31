@@ -260,7 +260,9 @@ function referenceEntries(referenceMap) {
   const entries = [];
   const push = (value, fallbackHref) => {
     if (typeof value === 'string') {
-      entries.push({ href: value, label: '' });
+      // A map entry like { "<url>": "label" } carries the href in the key.
+      if (fallbackHref !== undefined) entries.push({ href: fallbackHref, label: value });
+      else entries.push({ href: value, label: '' });
       return;
     }
     if (!isPlainObject(value)) return;
@@ -394,7 +396,15 @@ function parseContent({ content, referenceMap, maxChars, maxResources }) {
     const parent = stack[stack.length - 1];
     const insideCell = stack.some((entry) => entry.tag === 'td');
     if (element.tag === 'td') {
-      addBlock({ id: element.attrs.id, attrs: element.attrs, tag: 'td', kind: 'cell', text });
+      // Every td is a cell block, even when the cell is empty.
+      addBlock({
+        id: element.attrs.id,
+        attrs: element.attrs,
+        tag: 'td',
+        kind: 'cell',
+        text,
+        allowEmpty: true,
+      });
     } else if (!insideCell) {
       if (element.tag === 'title') {
         title = text;
@@ -521,6 +531,8 @@ function resourcePath(value, requestDir) {
   return candidate;
 }
 
+// Only source content participates: path, requestId, sourceIds and platform
+// tokens are derived or local and stay out of the fingerprint.
 function snapshotFingerprint(snapshot) {
   return sha256Text(canonicalJson({
     documentId: snapshot.documentId,
@@ -534,7 +546,6 @@ function snapshotFingerprint(snapshot) {
       fingerprint: resource.fingerprint,
       text: resource.text,
       reason: resource.reason,
-      sourceIds: resource.sourceIds,
     })),
     comments: snapshot.comments,
   }));
@@ -560,7 +571,7 @@ function diffSnapshots(before, after) {
     seen.add(key);
     changes.push(id === undefined ? { target } : { target, id });
   };
-  const compare = (target, beforeItems, afterItems, fields, arrays = []) => {
+  const compare = (target, beforeItems, afterItems, fields) => {
     const left = new Map(beforeItems.map((item) => [item?.id, item]));
     const right = new Map(afterItems.map((item) => [item?.id, item]));
     const ids = [...new Set([...left.keys(), ...right.keys()])];
@@ -571,8 +582,7 @@ function diffSnapshots(before, after) {
         if (a !== b) push(target, id);
         continue;
       }
-      const changed = fields.some((field) => a[field] !== b[field])
-        || arrays.some((field) => canonicalJson(a[field] ?? null) !== canonicalJson(b[field] ?? null));
+      const changed = fields.some((field) => a[field] !== b[field]);
       if (changed) push(target, id);
     }
   };
@@ -584,7 +594,6 @@ function diffSnapshots(before, after) {
     before.resources,
     after.resources,
     ['kind', 'sourceBlockId', 'status', 'fingerprint', 'text', 'reason'],
-    ['sourceIds'],
   );
   compare('comments', before.comments, after.comments, ['text']);
   return changes;
@@ -599,8 +608,11 @@ function outputPath(requestDir, name) {
 function locateOutput(savedPath, target) {
   const candidates = [];
   if (typeof savedPath === 'string' && savedPath !== '') {
-    candidates.push(resolve(savedPath));
+    // The CLI may report an absolute path or one relative to the request
+    // directory. Resolve against the request directory first so a same-named
+    // file in the process cwd can never shadow the real output.
     candidates.push(resolve(dirname(target), savedPath));
+    candidates.push(resolve(savedPath));
   }
   candidates.push(resolve(target));
   for (const extension of OUTPUT_EXTENSIONS) candidates.push(resolve(`${target}${extension}`));
@@ -753,6 +765,8 @@ export function createCliResourceReaders({ run, limits = {} } = {}) {
     const rawFile = assertInside(requestDir, locateOutput(rawData.saved_path, rawTarget));
     const previewBytes = readBounded(previewFile, maxBytes);
     const rawBytes = readBounded(rawFile, maxBytes);
+    // The cap applies to the whole resource, not to each exported file.
+    if (previewBytes.length + rawBytes.length > maxBytes) fail('RESOURCE_TOO_LARGE');
     let raw;
     try {
       raw = JSON.parse(rawBytes.toString('utf8'));
@@ -814,6 +828,9 @@ export function createCliResourceReaders({ run, limits = {} } = {}) {
     const htmlFile = assertInside(requestDir, locateOutput(htmlData.saved_path, htmlTarget));
     const originalBytes = readBounded(originalFile, maxBytes);
     const htmlBytes = readBounded(htmlFile, maxBytes);
+    // The cap applies to the whole resource (original plus preview), not to
+    // each downloaded file.
+    if (originalBytes.length + htmlBytes.length > maxBytes) fail('RESOURCE_TOO_LARGE');
     const body = htmlToText(htmlBytes.toString('utf8'));
     const room = Math.max(0, MAX_WORKBOOK_TEXT - WORKBOOK_TEXT_SUFFIX.length);
     return {
@@ -868,7 +885,14 @@ export function createPlanningDocumentReader({
     }
 
     const requestDir = resolve(assetsDir, link.requestId);
-    const data = await invoke(['docs', '+fetch', '--doc', normalized.url, '--detail', 'full']);
+    // Task 1 argv order: identity comes before --detail.
+    const data = await call([
+      'docs', '+fetch',
+      '--doc', normalized.url,
+      '--as', 'user',
+      '--detail', 'full',
+      '--json',
+    ]);
     const document = data.document;
     if (!isPlainObject(document) || typeof document.content !== 'string') {
       fail('SOURCE_READ_FAILED');
@@ -1008,7 +1032,12 @@ export function createPlanningDocumentReader({
     if (typeof requestId !== 'string' || !REQUEST_ID.test(requestId)) {
       fail('INVALID_REQUEST_ID');
     }
-    rmSync(resolve(assetsDir, requestId), { recursive: true, force: true });
+    try {
+      rmSync(resolve(assetsDir, requestId), { recursive: true, force: true });
+    } catch (cause) {
+      // Raw fs errors echo the local path; report a fixed code instead.
+      fail('CLEANUP_FAILED', cause);
+    }
   };
 
   return { read, revalidate, cleanup };

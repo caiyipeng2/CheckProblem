@@ -51,7 +51,8 @@ const CONTENT = [
   '<ol><li id="li-1">列表项</li></ol>',
   `<img id="img-1" src="${MEDIA.image1}" alt="大厅入口截图"/>`,
   '<table id="table-1"><tbody>',
-  '<tr><td id="cell-1-1">第一张表 A1</td><td id="cell-1-2">第一张表 B1</td></tr>',
+  '<tr><td id="cell-1-1">第一张表 A1</td><td id="cell-1-2">第一张表 B1</td>'
+    + '<td id="cell-1-3"></td></tr>',
   '</tbody></table>',
   '<h2 id="chapter-2">第二章 表格</h2>',
   '<p id="p-2">表格之后。</p>',
@@ -136,6 +137,7 @@ function platformFixture(overrides = {}) {
   const state = {
     content: control.content ?? CONTENT,
     referenceMap: control.referenceMap ?? REFERENCE_MAP,
+    commentPages: control.commentPages ?? COMMENT_PAGES,
     documentId: control.documentId ?? 'syntheticDocumentToken',
     revision: control.revision ?? '1583',
     workbookCell: control.workbookCell ?? 'B2原始值',
@@ -169,15 +171,17 @@ function platformFixture(overrides = {}) {
     if (group === 'drive' && sub === '+list-comments') {
       if (control.commentsResult !== undefined) return control.commentsResult;
       const pageToken = argValue(args, '--page-token');
+      const pages = state.commentPages;
       if (!pageToken) {
+        const hasSecond = Array.isArray(pages.second);
         return ok({
-          items: COMMENT_PAGES.first,
-          has_more: true,
-          page_token: control.commentsNoToken ? null : 'comment-page-2',
+          items: pages.first,
+          has_more: hasSecond,
+          page_token: control.commentsNoToken ? null : (hasSecond ? 'comment-page-2' : ''),
           count: 2,
         });
       }
-      return ok({ items: COMMENT_PAGES.second, has_more: false, page_token: '', count: 2 });
+      return ok({ items: pages.second, has_more: false, page_token: '', count: 2 });
     }
 
     if (group === 'docs' && sub === '+media-preview') {
@@ -189,7 +193,7 @@ function platformFixture(overrides = {}) {
       const bytes = token === MEDIA.xlsx ? state.originalBytes : IMAGE_BYTES(token);
       writeOutput(output, bytes);
       return ok({
-        saved_path: output,
+        saved_path: control.mediaSavedPath ?? output,
         size_bytes: bytes.length,
         content_type: token === MEDIA.xlsx ? 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' : 'image/png',
       });
@@ -251,6 +255,9 @@ function platformFixture(overrides = {}) {
     },
     setContent(value) {
       state.content = value;
+    },
+    setCommentPages(pages) {
+      state.commentPages = pages;
     },
     replaceWorkbookCell(value) {
       state.workbookCell = value;
@@ -321,6 +328,12 @@ test('reads a docx into ordered blocks, heading context, both comment pages and 
   assert.equal(secondCell.text, 'table-page-2');
   assert.equal(secondCell.heading, '第二章 表格');
 
+  // Every td is a cell block, including an empty one.
+  const emptyCell = snapshot.blocks.find((block) => block.id === 'cell-1-3');
+  assert.equal(emptyCell.kind, 'cell');
+  assert.equal(emptyCell.text, '');
+  assert.equal(emptyCell.heading, '第一章 入口');
+
   assert.equal(snapshot.comments[0].id, 'comment-1');
   assert.equal(snapshot.comments[0].text, '第一页评论\n回复一');
   assert.equal(snapshot.comments[0].sourceBlockId, null);
@@ -330,8 +343,13 @@ test('reads a docx into ordered blocks, heading context, both comment pages and 
 
   const fetchCalls = fixture.calls.filter((call) => call.args[0] === 'docs' && call.args[1] === '+fetch');
   assert.equal(fetchCalls.length, 1);
-  assert.equal(fetchCalls[0].args[fetchCalls[0].args.indexOf('--doc') + 1], DOC_URL);
-  assert.ok(fetchCalls[0].args.join(' ').includes('--detail full --as user --json'));
+  assert.deepEqual(fetchCalls[0].args, [
+    'docs', '+fetch',
+    '--doc', DOC_URL,
+    '--as', 'user',
+    '--detail', 'full',
+    '--json',
+  ]);
 
   const commentCalls = fixture.calls.filter((call) => call.args[1] === '+list-comments');
   assert.equal(commentCalls.length, 2);
@@ -472,6 +490,27 @@ test('a failing image reader leaves other resources readable', async (t) => {
   }
 });
 
+test('a failed spreadsheet read stays pending with its fixed reason', async (t) => {
+  for (const reason of ['RESOURCE_TRUNCATED', 'RESOURCE_TOO_LARGE']) {
+    const fixture = platformFixture({
+      readerOverrides: {
+        spreadsheet: async () => {
+          throw new Error(reason);
+        },
+      },
+    });
+    t.after(() => dispose(fixture));
+    const reader = createPlanningDocumentReader(fixture);
+    const snapshot = await reader.read(testDocLink);
+    const sheet = snapshot.resources.find((resource) => resource.kind === 'spreadsheet');
+    assert.equal(sheet.status, 'pending', reason);
+    assert.equal(sheet.reason, reason);
+    assert.equal(sheet.path, null);
+    // The failure stays local to that resource.
+    assert.equal(snapshot.resources.find((resource) => resource.kind === 'image').status, 'parsed');
+  }
+});
+
 test('references stay pending and are never followed recursively', async (t) => {
   const fixture = platformFixture();
   t.after(() => dispose(fixture));
@@ -487,6 +526,23 @@ test('references stay pending and are never followed recursively', async (t) => 
   }
   // A self-reference (anchor and reference_map) must not trigger a second fetch.
   assert.equal(fixture.calls.filter((call) => call.args[1] === '+fetch').length, 1);
+});
+
+test('reference_map accepts a URL key whose value is only a label', async (t) => {
+  const target = `https://${HOST}/docx/labeledReference`;
+  const fixture = platformFixture({
+    content: '<p id="p-ref">仅引用</p>',
+    referenceMap: { [target]: '带标题的引用' },
+  });
+  t.after(() => dispose(fixture));
+  const reader = createPlanningDocumentReader(fixture);
+  const snapshot = await reader.read(testDocLink);
+
+  const references = snapshot.resources.filter((resource) => resource.kind === 'reference');
+  assert.equal(references.length, 1);
+  assert.equal(references[0].text, '带标题的引用');
+  assert.equal(references[0].status, 'pending');
+  assert.equal(references[0].reason, 'REFERENCE_NOT_FOLLOWED');
 });
 
 test('the serialized snapshot keeps media tokens and signed URLs out', async (t) => {
@@ -598,6 +654,35 @@ test('revalidate reports unchanged, resource and document changes', async (t) =>
   ));
 });
 
+test('revalidate reports comment edits and ignores derived resource fields', async (t) => {
+  const fixture = platformFixture();
+  t.after(() => dispose(fixture));
+  const reader = createPlanningDocumentReader(fixture);
+  const before = await reader.read(testDocLink);
+  assert.deepEqual(await reader.revalidate(before), { unchanged: true, changes: [] });
+
+  // sourceIds is derived and must not show up as a resource change even when
+  // the stored snapshot carries a stale pointer set.
+  const stale = structuredClone(before);
+  stale.resources = stale.resources.map((resource) => ({
+    ...resource,
+    sourceIds: [...resource.sourceIds, 'stale-derived-pointer'],
+  }));
+  fixture.setCommentPages({
+    first: [{
+      comment_id: 'comment-1',
+      quote: '第一页评论',
+      is_solved: false,
+      reply_list: [{ content: '回复二' }],
+    }],
+    second: COMMENT_PAGES.second,
+  });
+
+  const diff = await reader.revalidate(stale);
+  assert.equal(diff.unchanged, false);
+  assert.deepEqual(diff.changes, [{ target: 'comments', id: 'comment-1' }]);
+});
+
 test('revalidate never treats an unreadable, truncated or replaced source as unchanged', async (t) => {
   const fixture = platformFixture();
   t.after(() => dispose(fixture));
@@ -642,6 +727,24 @@ test('cleanup removes the request directory and rejects unsafe ids', async (t) =
   assert.throws(() => reader.cleanup('../escape'), { message: 'INVALID_REQUEST_ID' });
   assert.throws(() => reader.cleanup(''), { message: 'INVALID_REQUEST_ID' });
   assert.doesNotThrow(() => reader.cleanup('req_missing_1'));
+});
+
+test('cleanup maps filesystem failures to a fixed code without echoing paths', (t) => {
+  const fixture = platformFixture();
+  t.after(() => dispose(fixture));
+  // A NUL byte makes rmSync itself reject on every platform, which exercises
+  // the mapping without a platform-specific permission setup.
+  const hostile = createPlanningDocumentReader({
+    ...fixture,
+    assetsDir: join(tmpdir(), 'planning-cleanup', 'bad\u0000dir'),
+  });
+  assert.throws(() => hostile.cleanup('req_cleanup_1'), (error) => {
+    assert.equal(error.message, 'CLEANUP_FAILED');
+    assert.ok(!error.message.includes(tmpdir()));
+    assert.ok(!error.message.includes('bad'));
+    return true;
+  });
+  assert.throws(() => hostile.cleanup('../escape'), { message: 'INVALID_REQUEST_ID' });
 });
 
 test('production resource readers match the verified argv and hash real bytes', async (t) => {
@@ -811,6 +914,45 @@ test('production reader failures use fixed codes and fail closed', async (t) => 
     assert.ok(!error.message.includes('remote'));
     return true;
   });
+
+  // Whiteboard preview and raw are each under the cap, but the resource sum is
+  // over it, so the resource must not be treated as parsed.
+  const summed = platformFixture();
+  t.after(() => dispose(summed));
+  const previewLength = summed.whiteboardPreviewBytes.length;
+  const rawLength = summed.whiteboardRawBytes().length;
+  const whiteboardCapped = createCliResourceReaders({
+    run: summed.run,
+    limits: { maxResourceBytes: previewLength + rawLength - 1 },
+  });
+  await assert.rejects(whiteboardCapped.whiteboard({
+    resource: {
+      id: 'wb-1',
+      kind: 'whiteboard',
+      sourceBlockId: 'wb-1',
+      token: MEDIA.whiteboard,
+    },
+    requestDir: summed.assetsDir,
+  }), { message: 'RESOURCE_TOO_LARGE' });
+
+  // The workbook original and its HTML preview are each under the cap, but
+  // their combined bytes are not.
+  const workbookCapped = createCliResourceReaders({
+    run: summed.run,
+    limits: {
+      maxResourceBytes: summed.workbookBytes().length
+        + summed.workbookHtmlBytes().length - 1,
+    },
+  });
+  await assert.rejects(workbookCapped.workbook({
+    resource: {
+      id: 'xlsx-1',
+      kind: 'workbook',
+      sourceBlockId: 'source-1',
+      token: MEDIA.xlsx,
+    },
+    requestDir: summed.assetsDir,
+  }), { message: 'RESOURCE_TOO_LARGE' });
 });
 
 test('fingerprint is deterministic and independent of the request directory', async (t) => {
@@ -830,6 +972,70 @@ test('fingerprint is deterministic and independent of the request directory', as
   const firstImage = first.resources.find((resource) => resource.kind === 'image');
   const thirdImage = third.resources.find((resource) => resource.kind === 'image');
   assert.notEqual(firstImage.path, thirdImage.path);
+});
+
+test('the fingerprint and diff ignore path, requestId and sourceIds', async (t) => {
+  const fixture = platformFixture();
+  t.after(() => dispose(fixture));
+  const reader = createPlanningDocumentReader(fixture);
+  const before = await reader.read(testDocLink);
+
+  // A different requestId implies different local paths; both are derived and
+  // must leave the stored fingerprint intact across a re-read.
+  const relocated = structuredClone(before);
+  relocated.requestId = 'req_relocated_1';
+  relocated.resources = relocated.resources.map((resource) => ({
+    ...resource,
+    path: resource.path === null ? null : `${resource.path}.decoy`,
+  }));
+  assert.deepEqual(await reader.revalidate(relocated), { unchanged: true, changes: [] });
+
+  // A reader that reports a different sourceIds set on the second read must
+  // not perturb the fingerprint either.
+  let round = 0;
+  const churn = platformFixture({
+    readerOverrides: {
+      image: async ({ resource }) => {
+        round += 1;
+        return {
+          text: '',
+          fingerprint: 'b'.repeat(64),
+          sourceIds: [`${resource.sourceBlockId}-derived-${round}`],
+          path: null,
+        };
+      },
+    },
+  });
+  t.after(() => dispose(churn));
+  const churnReader = createPlanningDocumentReader(churn);
+  const first = await churnReader.read({ ...testDocLink, requestId: 'req_source_1' });
+  assert.deepEqual(await churnReader.revalidate(first), { unchanged: true, changes: [] });
+});
+
+test('saved_path is resolved inside the request directory before the cwd', async (t) => {
+  const fixture = platformFixture({ mediaSavedPath: 'image-1' });
+  t.after(() => dispose(fixture));
+  const requestDir = mkdtempSync(join(tmpdir(), 'planning-saved-'));
+  t.after(() => rmSync(requestDir, { recursive: true, force: true }));
+  const cwdDir = mkdtempSync(join(tmpdir(), 'planning-cwd-'));
+  const previousCwd = process.cwd();
+  t.after(() => {
+    process.chdir(previousCwd);
+    rmSync(cwdDir, { recursive: true, force: true });
+  });
+
+  // A same-named file in the process cwd must not shadow the real output.
+  writeFileSync(join(cwdDir, 'image-1'), 'cwd decoy bytes');
+  process.chdir(cwdDir);
+
+  const readers = createCliResourceReaders({ run: fixture.run, limits: fixture.limits });
+  const image = await readers.image({
+    resource: { id: 'image-1', kind: 'image', sourceBlockId: 'img-1', token: MEDIA.image1 },
+    requestDir,
+  });
+  assert.equal(image.path, join(requestDir, 'image-1'));
+  assert.equal(image.fingerprint, fixture.sha256([fixture.imageBytes(MEDIA.image1)]));
+  assert.equal(existsSync(join(cwdDir, 'image-1')), true);
 });
 
 

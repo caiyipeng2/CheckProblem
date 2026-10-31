@@ -143,6 +143,47 @@ test('parent template carries the document identity and the approved scope', () 
   }
 });
 
+test('parent fields keep the document id discoverable when the wiki url token differs', async () => {
+  const documentId = 'doxcn_doc_999';
+  const request = parentRequest();
+  request.snapshot.documentId = documentId;
+  request.snapshot.url = 'https://example.feishu.cn/wiki/wikcn_node_777';
+  const fields = buildParentFields({ request, target, marker: MARKER });
+  assert.ok(fields.description.includes('wikcn_node_777'));
+  assert.ok(fields.description.includes(
+    `（文档 ID：${documentId}；本单不附带飞书附件，来源见需求文档链接）`,
+  ));
+
+  const { client } = createClient((url) => {
+    const page = Number(new URL(url).searchParams.get('page'));
+    return response({
+      status: 1,
+      data: page === 1
+        ? [storyItem({
+          id: 'P1',
+          name: fields.name,
+          parent_id: '0',
+          description: fields.description,
+        })]
+        : [],
+    });
+  });
+  const found = await client.findParents({
+    workspaceId: '59180547',
+    name: fields.name,
+    documentId,
+  });
+  assert.equal(found.complete, true);
+  assert.deepEqual(found.items.map((story) => story.id), ['P1']);
+
+  const other = await client.findParents({
+    workspaceId: '59180547',
+    name: fields.name,
+    documentId: 'doxcn_other_111',
+  });
+  assert.deepEqual(other.items, []);
+});
+
 test('parent template omits owner and iteration unless configured and falls back to the snapshot title', () => {
   const fields = buildParentFields({
     request: parentRequest(),
@@ -163,6 +204,16 @@ test('parent title drops control characters and is clipped to 100 characters', (
   });
   assert.equal(fields.name.length, 100);
   assert.ok(!fields.name.includes('\n'));
+});
+
+test('title clipping never splits a surrogate pair', () => {
+  const fields = buildParentFields({
+    request: parentRequest(),
+    target: { ...target, parent: { title: `${'a'.repeat(99)}𝌆${'b'.repeat(20)}` } },
+    marker: MARKER,
+  });
+  assert.equal(fields.name.length, 99);
+  assert.ok(!/[\uD800-\uDFFF]/.test(fields.name));
 });
 
 test('parent template keeps the marker last when exclusions overflow the description', () => {
@@ -238,6 +289,24 @@ test('child title drops control characters and is clipped to 100 characters', ()
   assert.ok(!fields.name.includes('\n'));
 });
 
+test('child template carries the document link, revision, fingerprint and attachment declaration', () => {
+  const fields = buildChildFields({
+    story: flatStory(),
+    request: childRequest(),
+    target,
+    parentId: 'P1',
+    dependencyIds: { M02: '1' },
+    marker: MARKER,
+  });
+  const description = fields.description;
+  assert.ok(description.includes(
+    '<a href="https://example.feishu.cn/docx/docx_abc">'
+      + 'https://example.feishu.cn/docx/docx_abc</a>',
+  ));
+  assert.ok(description.includes('版本：rev-1（指纹 sha256:doc-1）'));
+  assert.ok(description.includes('本单不附带飞书附件'));
+});
+
 test('child template keeps the marker last when rules overflow the description', () => {
   const rules = Array.from({ length: 10 }, () => ({ text: '规'.repeat(2000), factIds: ['F1'] }));
   const fields = buildChildFields({
@@ -250,6 +319,38 @@ test('child template keeps the marker last when rules overflow the description',
   });
   assert.ok(fields.description.length <= 6000);
   assert.deepEqual(fields.description.split('<br />').at(-1), `【追踪标识】${MARKER}`);
+});
+
+test('clipped descriptions stay well formed around the document link', () => {
+  const fillers = [
+    (length) => '字'.repeat(length),
+    (length) => '&'.repeat(length),
+    (length) => '𝌆'.repeat(Math.ceil(length / 2)),
+  ];
+  const tail = `【追踪标识】${MARKER}`;
+  for (const filler of fillers) {
+    for (let length = 4700; length <= 6000; length += 7) {
+      const fields = buildChildFields({
+        story: flatStory({ rules: [{ text: filler(length), factIds: ['F1'] }] }),
+        request: childRequest(),
+        target,
+        parentId: 'P1',
+        dependencyIds: { M02: '1' },
+        marker: MARKER,
+      });
+      const description = fields.description;
+      assert.ok(description.length <= 6000, `limit at rule length ${length}`);
+      assert.deepEqual(description.split('<br />').at(-1), tail, `marker last at ${length}`);
+      const body = description.slice(0, description.length - tail.length - '<br />'.length);
+      assert.ok(!/&[A-Za-z#0-9]*$/.test(body), `entity fragment at ${length}`);
+      assert.ok(!/<[^>]*$/.test(body), `tag fragment at ${length}`);
+      const opens = (description.match(/<a /g) ?? []).length;
+      const closes = (description.match(/<\/a>/g) ?? []).length;
+      assert.equal(opens, closes, `balanced anchors at ${length}`);
+      assert.ok(!/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/.test(description), `lone high at ${length}`);
+      assert.ok(!/[^\uD800-\uDBFF][\uDC00-\uDFFF]/.test(description), `lone low at ${length}`);
+    }
+  }
 });
 
 test('child owner and iteration prefer the story and fall back to child defaults', () => {
@@ -757,6 +858,40 @@ test('findParents reports incomplete when the search cannot be finished', async 
   assert.deepEqual(result.items.map((story) => story.id), ['P1']);
 });
 
+test('findParents searches with the cleaned title so long raw titles reconcile', async () => {
+  const rawTitle = `标\n题${'字'.repeat(120)}`;
+  const fields = buildParentFields({
+    request: parentRequest(),
+    target: { ...target, parent: { title: rawTitle } },
+    marker: MARKER,
+  });
+  assert.equal(fields.name.length, 100);
+  const { client, calls } = createClient((url) => {
+    const page = Number(new URL(url).searchParams.get('page'));
+    return response({
+      status: 1,
+      data: page === 1
+        ? [storyItem({
+          id: 'P1',
+          name: fields.name,
+          parent_id: '0',
+          description: fields.description,
+        })]
+        : [],
+    });
+  });
+  const result = await client.findParents({
+    workspaceId: '59180547',
+    name: rawTitle,
+    documentId: 'docx_abc',
+  });
+  assert.equal(result.complete, true);
+  assert.deepEqual(result.items.map((story) => story.id), ['P1']);
+  const params = new URL(calls[0].url).searchParams;
+  assert.equal(params.get('name'), fields.name);
+  assert.equal(params.get('name').length, 100);
+});
+
 test('findByMarker matches only the exact token for the requested parent', async () => {
   const marker = 'req-r1-M01';
   const { client, calls } = createClient((url) => {
@@ -807,5 +942,100 @@ test('findByMarker rejects an invalid marker before any request', async () => {
       .catch((caught) => caught);
     assert.equal(error.code, 'INVALID_MARKER');
     assert.deepEqual(calls, []);
+  }
+});
+
+test('template builders refuse missing ids as INVALID_ARGUMENT', () => {
+  const parent = parentRequest();
+  const child = childRequest();
+  const parentCases = [
+    {
+      label: 'parent workspaceId',
+      run: () => buildParentFields({ request: parent, target: { ...target, workspaceId: undefined }, marker: MARKER }),
+    },
+    {
+      label: 'parent parentTypeId',
+      run: () => buildParentFields({ request: parent, target: { ...target, parentTypeId: '' }, marker: MARKER }),
+    },
+    {
+      label: 'parent templateId',
+      run: () => buildParentFields({ request: parent, target: { ...target, templateId: undefined }, marker: MARKER }),
+    },
+    {
+      label: 'parent documentId',
+      run: () => buildParentFields({
+        request: { ...parent, snapshot: { ...parent.snapshot, documentId: '' } },
+        target,
+        marker: MARKER,
+      }),
+    },
+  ];
+  const childCases = [
+    {
+      label: 'child workspaceId',
+      run: () => buildChildFields({ story: flatStory(), request: child, target: { ...target, workspaceId: undefined }, parentId: 'P1', dependencyIds: { M02: '1' }, marker: MARKER }),
+    },
+    {
+      label: 'child childTypeId',
+      run: () => buildChildFields({ story: flatStory(), request: child, target: { ...target, childTypeId: '' }, parentId: 'P1', dependencyIds: { M02: '1' }, marker: MARKER }),
+    },
+    {
+      label: 'child templateId',
+      run: () => buildChildFields({ story: flatStory(), request: child, target: { ...target, templateId: undefined }, parentId: 'P1', dependencyIds: { M02: '1' }, marker: MARKER }),
+    },
+    {
+      label: 'child parentId',
+      run: () => buildChildFields({ story: flatStory(), request: child, target, parentId: '', dependencyIds: { M02: '1' }, marker: MARKER }),
+    },
+  ];
+  for (const { label, run } of [...parentCases, ...childCases]) {
+    assert.throws(
+      run,
+      (error) => error.code === 'INVALID_ARGUMENT' && !error.message.includes('undefined'),
+      label,
+    );
+  }
+});
+
+test('adapter entry points refuse missing ids before any request', async () => {
+  const cases = [
+    { label: 'getStory workspaceId', run: (client) => client.getStory({ id: '1' }) },
+    { label: 'getStory id', run: (client) => client.getStory({ workspaceId: '1' }) },
+    { label: 'listChildren workspaceId', run: (client) => client.listChildren({ parentId: 'P1' }) },
+    { label: 'listChildren parentId', run: (client) => client.listChildren({ workspaceId: '1' }) },
+    {
+      label: 'findParents workspaceId',
+      run: (client) => client.findParents({ name: '总单', documentId: 'docx_abc' }),
+    },
+    {
+      label: 'findParents name',
+      run: (client) => client.findParents({ workspaceId: '1', name: '', documentId: 'docx_abc' }),
+    },
+    {
+      label: 'findParents cleaned name',
+      run: (client) => client.findParents({ workspaceId: '1', name: '\n\u0001', documentId: 'docx_abc' }),
+    },
+    {
+      label: 'findParents documentId',
+      run: (client) => client.findParents({ workspaceId: '1', name: '总单' }),
+    },
+    {
+      label: 'findByMarker workspaceId',
+      run: (client) => client.findByMarker({ parentId: 'P1', marker: MARKER }),
+    },
+    {
+      label: 'findByMarker parentId',
+      run: (client) => client.findByMarker({ workspaceId: '1', marker: MARKER }),
+    },
+    {
+      label: 'createStory workspaceId',
+      run: (client) => client.createStory({ fields: { name: 'N' } }),
+    },
+  ];
+  for (const { label, run } of cases) {
+    const { client, calls } = createClient(() => response({ status: 1, data: [] }));
+    const error = await run(client).catch((caught) => caught);
+    assert.equal(error.code, 'INVALID_ARGUMENT', label);
+    assert.deepEqual(calls, [], label);
   }
 });

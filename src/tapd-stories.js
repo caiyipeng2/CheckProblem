@@ -41,6 +41,13 @@ function assertMarker(marker) {
   return marker;
 }
 
+function assertId(value, field) {
+  if (typeof value !== 'string' || value === '') {
+    fail('INVALID_ARGUMENT', `tapd-stories: ${field} is required`);
+  }
+  return value;
+}
+
 function esc(value) {
   return String(value ?? '')
     .replace(/&/g, '&amp;')
@@ -55,7 +62,10 @@ function line(value) {
 }
 
 function cleanTitle(value) {
-  return String(value ?? '').replace(CONTROL_CHARS, '').slice(0, TITLE_LIMIT);
+  const text = String(value ?? '').replace(CONTROL_CHARS, '');
+  if (text.length <= TITLE_LIMIT) return text;
+  const clipped = text.slice(0, TITLE_LIMIT);
+  return /[\uD800-\uDBFF]$/.test(clipped) ? clipped.slice(0, -1) : clipped;
 }
 
 function firstValue(...values) {
@@ -82,15 +92,26 @@ function issueLine(issue) {
 
 // The clip can only cut the tail; a partial entity or tag would make the HTML
 // malformed, so those fragments are dropped before the marker is appended.
-function clipHtml(text, max) {
-  if (text.length <= max) return text;
-  let cut = text.slice(0, Math.max(0, max));
-  // Never leave half of a surrogate pair at the cut point.
-  if (/[\uD800-\uDBFF]$/.test(cut)) cut = cut.slice(0, -1);
-  return cut
+// An anchor opened before the cut would otherwise swallow the marker, so the
+// missing closing tags are appended, paid for by trimming body text.
+function trimFragments(text) {
+  return text
     .replace(/&[A-Za-z#0-9]*$/, '')
     .replace(/<[^>]*$/, '')
     .replace(/(?:<br \/>)+$/, '');
+}
+
+function clipHtml(text, max) {
+  if (text.length <= max) return text;
+  let cut = text.slice(0, Math.max(0, max));
+  if (/[\uD800-\uDBFF]$/.test(cut)) cut = cut.slice(0, -1);
+  cut = trimFragments(cut);
+  const opens = (cut.match(/<a /g) ?? []).length;
+  const closes = (cut.match(/<\/a>/g) ?? []).length;
+  const missing = Math.max(0, opens - closes);
+  if (missing === 0) return cut;
+  const closers = '</a>'.repeat(missing);
+  return `${trimFragments(cut.slice(0, Math.max(0, max - closers.length)))}${closers}`;
 }
 
 function assembleDescription(lines, marker) {
@@ -132,6 +153,10 @@ function sourceLines(story, snapshot) {
 export function buildParentFields({ request, target, marker } = {}) {
   assertMarker(marker);
   const snapshot = request?.snapshot ?? {};
+  assertId(target?.workspaceId, 'target.workspaceId');
+  assertId(target?.parentTypeId, 'target.parentTypeId');
+  assertId(target?.templateId, 'target.templateId');
+  assertId(snapshot.documentId, 'snapshot.documentId');
   const draft = request?.draft ?? {};
   const stories = Array.isArray(draft.stories) ? draft.stories : [];
   const approved = stories.filter((story) => story?.disposition === 'approved');
@@ -142,7 +167,7 @@ export function buildParentFields({ request, target, marker } = {}) {
   const title = target?.parent?.title ?? snapshot.title;
 
   const lines = [
-    `【需求文档】${documentLink(snapshot.url)}（本单不附带飞书附件，来源见需求文档链接）`,
+    `【需求文档】${documentLink(snapshot.url)}（文档 ID：${line(snapshot.documentId)}；本单不附带飞书附件，来源见需求文档链接）`,
     versionLine(snapshot),
     `【目标】${line(title)}`,
     '【本期范围】',
@@ -161,10 +186,10 @@ export function buildParentFields({ request, target, marker } = {}) {
   ];
 
   const fields = {
-    workspace_id: String(target?.workspaceId ?? ''),
+    workspace_id: target.workspaceId,
     name: cleanTitle(title),
-    workitem_type_id: String(target?.parentTypeId ?? ''),
-    templated_id: String(target?.templateId ?? ''),
+    workitem_type_id: target.parentTypeId,
+    templated_id: target.templateId,
     description: assembleDescription(lines, marker),
   };
   const owner = firstValue(target?.parent?.owner);
@@ -183,6 +208,10 @@ export function buildChildFields({
   marker,
 } = {}) {
   assertMarker(marker);
+  assertId(target?.workspaceId, 'target.workspaceId');
+  assertId(target?.childTypeId, 'target.childTypeId');
+  assertId(target?.templateId, 'target.templateId');
+  assertId(parentId, 'parentId');
   const snapshot = request?.snapshot ?? {};
   const draft = request?.draft ?? {};
   const rules = Array.isArray(story?.rules) ? story.rules : [];
@@ -227,11 +256,11 @@ export function buildChildFields({
   }
 
   const fields = {
-    workspace_id: String(target?.workspaceId ?? ''),
+    workspace_id: target.workspaceId,
     name: cleanTitle(story?.title),
-    parent_id: String(parentId ?? ''),
-    workitem_type_id: String(target?.childTypeId ?? ''),
-    templated_id: String(target?.templateId ?? ''),
+    parent_id: parentId,
+    workitem_type_id: target.childTypeId,
+    templated_id: target.templateId,
     description: assembleDescription(lines, marker),
   };
   const owner = firstValue(story?.owner, target?.childDefaults?.owner);
@@ -362,14 +391,16 @@ export function createTapdStories({
 
   return {
     async getStory({ workspaceId, id } = {}) {
+      assertId(workspaceId, 'workspaceId');
+      assertId(id, 'id');
       const token = tokenOrFail();
       const params = new URLSearchParams({
-        workspace_id: String(workspaceId),
-        id: String(id),
+        workspace_id: workspaceId,
+        id,
       });
       const result = await getPage(token, params);
       if (!result.ok) fail('READ_FAILED', 'tapd-stories: 读取需求失败');
-      const wanted = String(id);
+      const wanted = id;
       const found = result.items
         .map((item) => normalizeStory(unwrapStory(item), workspaceId))
         .find((story) => story.id === wanted);
@@ -378,16 +409,21 @@ export function createTapdStories({
     },
 
     async listChildren({ workspaceId, parentId } = {}) {
+      assertId(workspaceId, 'workspaceId');
+      assertId(parentId, 'parentId');
       const token = tokenOrFail();
-      return collectPages(token, workspaceId, { parent_id: String(parentId) });
+      return collectPages(token, workspaceId, { parent_id: parentId });
     },
 
     async findParents({ workspaceId, name, documentId } = {}) {
+      assertId(workspaceId, 'workspaceId');
+      const wantedName = cleanTitle(name);
+      assertId(wantedName, 'name');
+      assertId(documentId, 'documentId');
       const token = tokenOrFail();
-      const wantedName = String(name);
       const { items, complete } = await collectPages(token, workspaceId, { name: wantedName });
       return {
-        items: items.filter((story) => story.name === wantedName
+        items: items.filter((story) => cleanTitle(story.name) === wantedName
           && story.parentId === '0'
           && hasDescriptionToken(story.description, documentId)),
         complete,
@@ -396,9 +432,11 @@ export function createTapdStories({
 
     async findByMarker({ workspaceId, parentId, marker } = {}) {
       assertMarker(marker);
+      assertId(workspaceId, 'workspaceId');
+      assertId(parentId, 'parentId');
       const token = tokenOrFail();
-      const wantedWorkspace = String(workspaceId);
-      const wantedParent = String(parentId);
+      const wantedWorkspace = workspaceId;
+      const wantedParent = parentId;
       const { items, complete } = await collectPages(token, workspaceId, {
         parent_id: wantedParent,
       });
@@ -411,13 +449,14 @@ export function createTapdStories({
     },
 
     async createStory({ workspaceId, fields } = {}) {
+      assertId(workspaceId, 'workspaceId');
       const token = tokenOrFail();
       const form = new URLSearchParams();
       for (const [key, value] of Object.entries(fields ?? {})) {
         if (value == null) continue;
         form.set(key, String(value));
       }
-      form.set('workspace_id', String(workspaceId));
+      form.set('workspace_id', workspaceId);
 
       let res;
       try {

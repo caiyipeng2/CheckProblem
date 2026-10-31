@@ -321,8 +321,37 @@ test('more than the batch limit stories are rejected using the exported limit', 
   });
 });
 
+function manyStoryDraft(count) {
+  return makeDraft({
+    facts: Array.from({ length: count }, (_, index) => ({
+      id: `F${index}`,
+      sourceIds: ['b_m01'],
+      text: `事实 ${index}`,
+      kind: 'source',
+    })),
+    stories: Array.from({ length: count }, (_, index) => makeStory(`K${index}`, [`F${index}`])),
+  });
+}
+
+test('exactly the batch limit of approved stories is allowed, one more is not', () => {
+  const atLimit = manyStoryDraft(MAX_BATCH_STORIES);
+  assert.equal(validate(atLimit), atLimit);
+  assert.deepEqual(eligibility(atLimit, atLimit.stories.map((story) => story.key)), {
+    allowed: true,
+    blockers: [],
+  });
+
+  const overLimit = manyStoryDraft(MAX_BATCH_STORIES + 1);
+  assert.equal(validate(overLimit), overLimit);
+  assert.deepEqual(eligibility(overLimit, overLimit.stories.map((story) => story.key)), {
+    allowed: false,
+    blockers: [{ code: 'BATCH_LIMIT' }],
+  });
+});
+
 test('an unresolved blocking issue blocks only its stories', () => {
-  const draft = approvedDraft();
+  const draft = makeDraft();
+  draft.stories = [makeStory('M01', ['F1']), makeStory('M02', ['F2'])];
   draft.issues = [{
     id: 'I1',
     question: '排名是实时还是结算时判定？',
@@ -330,13 +359,14 @@ test('an unresolved blocking issue blocks only its stories', () => {
     blocking: true,
     resolvedBy: null,
   }];
-  assert.deepEqual(eligibility(draft, ['M01']), {
+  assert.deepEqual(eligibility(draft, ['M01', 'M02']), {
     allowed: false,
     blockers: [{ code: 'OPEN_BLOCKING_ISSUE', key: 'M01' }],
   });
+  assert.deepEqual(eligibility(draft, ['M02']), { allowed: true, blockers: [] });
 
   draft.issues[0].resolvedBy = { actorId: 'ou_reviewer', text: '结算时判定', at: '2026-10-30T00:00:00.000Z' };
-  assert.deepEqual(eligibility(draft, ['M01']), { allowed: true, blockers: [] });
+  assert.deepEqual(eligibility(draft, ['M01', 'M02']), { allowed: true, blockers: [] });
 });
 
 test('a pending resource blocks only stories that reference it directly', () => {
@@ -481,6 +511,27 @@ test('payload hashes ignore batch id and approval time but track content', () =>
     draft: { ...approvedDraft(), version: 2 },
   }));
   assert.notEqual(otherVersion.payloadHash, first.payloadHash);
+
+  const bindFirst = freeze(request, ['M01'], {
+    workspaceId: 'ws_weapon',
+    parent: { mode: 'bind', storyId: '1001' },
+  });
+  const bindSecond = freeze(request, ['M01'], {
+    workspaceId: 'ws_weapon',
+    parent: { mode: 'bind', storyId: '2002' },
+  });
+  assert.notEqual(bindSecond.payloadHash, bindFirst.payloadHash);
+  assert.notEqual(bindFirst.payloadHash, first.payloadHash);
+
+  const otherOwner = freeze(request, ['M01'], freezeTarget({
+    childDefaults: { owner: 'ou_other', iterationId: 'iter_1' },
+  }));
+  assert.notEqual(otherOwner.payloadHash, first.payloadHash);
+
+  const otherIteration = freeze(request, ['M01'], freezeTarget({
+    childDefaults: { owner: 'ou_owner', iterationId: 'iter_2' },
+  }));
+  assert.notEqual(otherIteration.payloadHash, first.payloadHash);
 });
 
 test('freezing deep-copies the draft', () => {
@@ -705,6 +756,32 @@ test('explaining a resource records the decision and unblocks its stories', () =
   assert.deepEqual(eligibility(updated.draft, ['M01', 'M02']), { allowed: true, blockers: [] });
 });
 
+test('explaining a resource normalizes a missing resource decision log', () => {
+  const request = makeRequest({ draft: twoStoryDraft() });
+  delete request.draft.resourceDecisions;
+  const updated = review(request, {
+    type: 'explain-resource',
+    resourceId: 'r_video',
+    action: 'exclude',
+    text: '视频不需要参考',
+  });
+  assert.equal(updated.draft.resourceDecisions.length, 1);
+  assert.equal(updated.draft.resourceDecisions[0].resourceId, 'r_video');
+  assert.equal(updated.draft.version, 2);
+
+  const malformed = makeRequest({ draft: twoStoryDraft() });
+  malformed.draft.resourceDecisions = 'not-an-array';
+  assert.throws(
+    () => review(malformed, {
+      type: 'explain-resource',
+      resourceId: 'r_video',
+      action: 'explain',
+      text: '说明',
+    }),
+    { message: 'INVALID_DECISION' },
+  );
+});
+
 test('selecting fields updates the owner', () => {
   const request = makeRequest();
   const updated = review(request, {
@@ -738,6 +815,49 @@ test('approving a suggestion-backed story clears the suggestion blocker', () => 
   assert.deepEqual(eligibility(updated.draft, ['M01']), { allowed: true, blockers: [] });
   assert.equal(validate(updated.draft), updated.draft);
 });
+
+function sharedSuggestionDraft() {
+  const draft = makeDraft();
+  draft.facts.push({
+    id: 'F3',
+    sourceIds: ['b_m01'],
+    text: '建议增加排行榜展示',
+    kind: 'suggestion',
+  });
+  draft.stories = [
+    makeStory('M01', ['F1', 'F3']),
+    makeStory('M02', ['F2', 'F3']),
+  ];
+  return draft;
+}
+
+for (const [type, extra] of [
+  ['defer', {}],
+  ['exclude', { reason: '本期不做大厅入口' }],
+]) {
+  test(`a ${type} decision does not approve shared suggestion facts`, () => {
+    const request = makeRequest({ draft: sharedSuggestionDraft() });
+    const reviewed = review(request, { type, storyKeys: ['M01'], ...extra });
+
+    // Audit record is written, but only an approve may vouch for a suggestion.
+    assert.equal(reviewed.draft.decisions.length, 1);
+    assert.deepEqual(reviewed.draft.decisions[0].sourceIds, []);
+    assert.equal(
+      reviewed.draft.stories[0].disposition,
+      type === 'defer' ? 'deferred' : 'excluded',
+    );
+
+    // M02 is approved and shares F3, yet no approve record exists for F3.
+    assert.deepEqual(eligibility(reviewed.draft, ['M02']), {
+      allowed: false,
+      blockers: [{ code: 'UNAPPROVED_SUGGESTION', key: 'M02' }],
+    });
+
+    const approved = review(reviewed, { type: 'approve', storyKeys: ['M02'] });
+    assert.deepEqual(approved.draft.decisions[1].sourceIds, ['F3']);
+    assert.deepEqual(eligibility(approved.draft, ['M02']), { allowed: true, blockers: [] });
+  });
+}
 
 test('each successful decision increments the version and leaves its input intact', () => {
   const request = makeRequest();

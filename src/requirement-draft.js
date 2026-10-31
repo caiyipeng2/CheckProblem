@@ -600,7 +600,13 @@ export function applyReviewDecision({ request, actorId, decision } = {}) {
           draft.exclusions.push({ factIds: added, reason: decision.reason, approvedBy: actorId });
         }
       }
-      appendDecision(draft, { actorId, text, sourceIds: suggestionFactIds(draft, stories) });
+      // Only approval vouches for a suggestion. Defer and exclude keep an
+      // audit record but must not let a sibling story bypass review.
+      appendDecision(draft, {
+        actorId,
+        text,
+        sourceIds: decision.type === 'approve' ? suggestionFactIds(draft, stories) : [],
+      });
       break;
     }
     case 'answer': {
@@ -619,6 +625,12 @@ export function applyReviewDecision({ request, actorId, decision } = {}) {
       }
       if (!RESOURCE_ACTIONS.has(decision.action)) fail('INVALID_DECISION', ['action']);
       if (!validText(decision.text, MAX_DECISION_TEXT)) fail('INVALID_DECISION', ['text']);
+      if (draft.resourceDecisions === undefined || draft.resourceDecisions === null) {
+        draft.resourceDecisions = [];
+      }
+      if (!Array.isArray(draft.resourceDecisions)) {
+        fail('INVALID_DECISION', ['resourceDecisions']);
+      }
       draft.resourceDecisions.push({
         resourceId: decision.resourceId,
         action: decision.action,

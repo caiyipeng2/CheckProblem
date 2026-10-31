@@ -1,5 +1,5 @@
 {
-  "$note": "Synthetic protocol shapes captured for the requirement-decomposition feature. Every value is invented or masked; no real business text, document content, tokens, or signed URLs. Consumers: Tasks 2, 5, 7, 8, 9, 10 tests.",
+  "$note": "Synthetic protocol shapes captured for the requirement-decomposition feature. All values are invented; the workitem type/template ids in `observed` are placeholder shapes, not the real ids (those live only in the plan record and config). No real business text, document content, tokens, or signed URLs. Consumers: Tasks 2, 5, 7, 8, 9, 10 tests.",
   "tapd": {
     "envelope": {
       "ok": { "status": 1, "data": "<array|object>", "info": "success" },
@@ -27,13 +27,15 @@
           "version",
           "category_id",
           "label",
-          "is_apply_template_default_value"
+          "is_apply_template_default_value",
+          "apply_template"
         ],
         "notes": [
           "parent_id, workitem_type_id, templated_id are integers",
           "iteration_id is a string and defaults to '0'",
           "priority is deprecated in favor of priority_label",
-          "no idempotency key; a retried POST creates another story"
+          "no idempotency key; a retried POST creates another story",
+          "this contract is documented; write permission and parent_id child creation are not write-tested yet"
         ]
       },
       "response": {
@@ -42,7 +44,7 @@
           "Story": {
             "id": "1000000000000000001",
             "workitem_type_id": "1000000000000000025",
-            "name": "[synthetic] sample child story",
+            "name": "[synthetic] sample top-level story",
             "description": "<p>[synthetic] description</p>",
             "workspace_id": "1000001",
             "creator": "synthetic_user",
@@ -61,7 +63,8 @@
           }
         },
         "info": "success"
-      }
+      },
+      "notes": "The response shape is documented; the sample values depict a top-level story. Do not infer child creation behavior from it."
     },
     "storyRead": {
       "byId": {
@@ -76,11 +79,16 @@
         "paging": {
           "maxLimitObserved": 200,
           "terminatesOnEmptyPage": true,
-          "declaredOrderUnstable": true,
-          "childrenOfParent": 10,
+          "childrenOfSampleParent": 10,
           "page1Count": 10,
           "page2Count": 0
         }
+      },
+      "nameSearch": {
+        "path": "/stories",
+        "params": { "workspace_id": "<id>", "name": "<substring>", "page": 1, "limit": 200 },
+        "behavior": "substring match; an exact parent name can return several ids, so filter for exact name and parent_id == '0' client-side",
+        "verified": { "exactQueryCount": 1, "partialQueryCount": 9 }
       },
       "count": {
         "path": "/stories/count",
@@ -103,13 +111,13 @@
       },
       "fieldCountPerStory": 260,
       "descriptionIsHtml": true,
-      "workitemTypes": {
-        "weapon": { "parent": "1159180547001000025", "child": "1159180547001000027" },
-        "gear": { "parent": "1147943302001000056", "child": "1147943302001000060" }
+      "workitemTypeShapes": {
+        "weapon": { "parent": "1000000000000000025", "child": "1000000000000000027" },
+        "gear": { "parent": "1000000000000000056", "child": "1000000000000000060" }
       },
-      "templates": {
-        "weaponDefault": "1159180547001000039",
-        "gearDefault": "1147943302001000077"
+      "templateShapes": {
+        "weaponUsedByRealStories": "1000000000000000039",
+        "gearUsedByRealStories": "1000000000000000077"
       },
       "deniedForThisAccount": [
         "/stories/get_story_fields_lable",
@@ -133,7 +141,7 @@
     "detailModes": {
       "simple": { "contentChars": 13790, "contentBytes": 26110, "hasResourceTags": false },
       "full": { "contentChars": 21698, "contentBytes": 34018, "hasResourceTags": true, "hasAltText": true },
-      "outline": { "contentBytes": 904, "params": ["--scope", "outline", "--max-depth", "3"] }
+      "outline": { "contentChars": 607, "contentBytes": 689, "stdoutBytes": 904, "fragment": true, "params": ["--scope", "outline", "--max-depth", "3"] }
     },
     "blocks": {
       "title": { "tag": "title", "attrs": ["id"], "body": "text" },
@@ -141,17 +149,17 @@
       "paragraph": { "tag": "p", "attrs": ["id"], "body": "text or inline tags" },
       "list": { "tag": "ol|li", "attrs": ["id"] },
       "table": { "tag": "table", "attrs": ["id"], "children": "colgroup/col/tbody/tr/td" },
-      "image": { "tag": "img", "attrs": ["id", "name", "alt", "token", "width", "height", "origin-width", "origin-height"] },
+      "image": { "tag": "img", "attrs": ["id", "name", "alt", "height", "mime", "scale", "src", "width"], "mediaTokenAttr": "src", "note": "the media token is the value of src; there is no token attribute" },
       "whiteboard": { "tag": "whiteboard", "attrs": ["id", "token"] },
       "sheet": { "tag": "sheet", "attrs": ["id", "sheet-id", "token"] },
-      "file": { "tag": "source", "attrs": ["name", "mime", "size", "token"] },
-      "video": { "tag": "video", "attrs": ["id", "token"] },
+      "xlsxSource": { "tag": "source", "attrs": ["name", "mime", "size", "token"], "note": "uploaded spreadsheet attachment; no id" },
+      "videoSource": { "tag": "source", "attrs": ["id", "name", "mime", "size", "token", "width", "height", "origin-width", "origin-height"], "note": "video is a source tag with mime video/mp4; there is no <video> tag in the sample" },
       "anchor": { "tag": "a", "attrs": ["href"], "body": "text", "note": "not present in the sample doc; Feishu block schema" }
     },
-    "countsInSample": { "paragraphs": 74, "images": 24, "whiteboards": 1, "sheets": 1, "files": 1, "tables": 1, "anchors": 0 },
+    "countsInSample": { "paragraphs": 74, "images": 24, "whiteboards": 1, "sheets": 1, "sourceTags": 2, "xlsxSources": 1, "videoSources": 1, "tables": 1, "anchors": 0 },
     "resources": {
       "image": {
-        "command": ["docs", "+media-preview", "--token", "<img token>", "--output", "./image", "--as", "user", "--json", "--overwrite"],
+        "command": ["docs", "+media-preview", "--token", "<img src token>", "--output", "./image", "--as", "user", "--json", "--overwrite"],
         "response": { "ok": true, "data": { "content_type": "image/png", "saved_path": "./image.png", "size_bytes": 167041 } },
         "msApprox": 1600,
         "mediaDownload403": true
@@ -165,23 +173,30 @@
         "responseDataKeys": ["actual_range", "annotated_csv", "col_count", "col_indices", "current_region", "has_more", "revision", "row_count", "row_indices", "warning_message"],
         "sample": { "actualRange": "A1:D17", "annotatedCsvChars": 1063, "hasMore": false }
       },
-      "file": {
-        "command": ["docs", "+media-preview", "--token", "<file token>", "--output", "./attachment", "--as", "user", "--json", "--overwrite"],
-        "response": { "ok": true, "data": { "content_type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "saved_path": "./attachment.xlsx", "size_bytes": 761147 } },
+      "xlsxAttachment": {
+        "originalFile": { "command": ["docs", "+media-preview", "--token", "<source token>", "--output", "./attachment", "--as", "user", "--json", "--overwrite"], "response": { "ok": true, "data": { "content_type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "saved_path": "./attachment.xlsx", "size_bytes": 761147 } } },
+        "textExtraction": {
+          "command": ["drive", "+preview", "--file-token", "<source token>", "--type", "html", "--output", "./preview", "--if-exists", "overwrite", "--as", "user", "--json"],
+          "response": { "ok": true, "data": { "content_type": "text/html", "size_bytes": 1021539, "status": "READY" } },
+          "htmlTextCells": 59,
+          "availablePreviewTypes": ["pdf", "html", "pdf_lin"],
+          "textPreviewUnavailable": true,
+          "limitation": "HTML is a render: hidden sheets and formulas may be missing; record the source and the limitation"
+        },
         "driveDownload404": true
       },
       "comments": {
         "command": ["drive", "+list-comments", "--url", "<docx url>", "--as", "user", "--json"],
         "dataKeys": ["count", "file_token", "file_type", "has_more", "items", "page_token"],
-        "itemKeys": ["comment_id", "create_time", "is_solved", "is_whole", "quote", "reply_list", "solver_user_id", "update_time", "user_id"],
+        "itemKeys": ["comment_id", "create_time", "extra", "is_solved", "is_whole", "quote", "reply_list", "solver_user_id", "update_time", "user_id"],
         "replyKeys": ["content", "create_time", "reply_id", "update_time", "user_id"]
       },
       "wiki": {
         "inspect": { "command": ["drive", "+inspect", "--url", "<wiki url>", "--as", "user", "--json"], "dataKeys": ["input_url", "title", "token", "type", "url", "wiki_node"] },
-        "fetch": { "command": ["docs", "+fetch", "--doc", "<wiki url>", "--as", "user", "--detail", "simple", "--json"], "contentIsFragment": true, "documentIdDiffersFromNodeToken": true },
+        "fetch": { "command": ["docs", "+fetch", "--doc", "<wiki url>", "--as", "user", "--detail", "full", "--json"], "returnsFullContent": true, "outlineScopeReturnsFragment": true, "documentIdDiffersFromNodeToken": true },
         "listing": { "spaces": ["wiki", "+space-list"], "nodes": ["wiki", "+node-list", "--space-id", "<id>", "--page-size", "50"] }
       },
-      "video": { "reader": null, "status": "blocked", "note": "no verified frame/transcript reader in this runtime" }
+      "video": { "reader": null, "status": "blocked", "note": "video is an uploaded source with mime video/mp4; no verified frame/transcript reader, so it stays pending for manual review" }
     }
   },
   "message": {

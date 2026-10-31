@@ -1583,6 +1583,72 @@ test('a merge call may not invent issue ids', async () => {
   assert.ok(chat.calls[chat.calls.length - 1].prompt.includes('错误码 UNKNOWN_ISSUE'));
 });
 
+test('duplicate issues keep a blocking flag from any copy', async () => {
+  const { createDecomposer } = await loadDecomposer();
+  const snapshot = makeSnapshot({
+    blocks: [
+      { id: 'b_first', heading: '', kind: 'paragraph', text: '甲'.repeat(300) },
+      { id: 'b_second', heading: '', kind: 'paragraph', text: '乙'.repeat(300) },
+    ],
+    resources: [],
+    comments: [],
+  });
+  const run = async (firstBlocking) => {
+    const reply = ({ prompt }) => {
+      const data = replyData(prompt);
+      if (Array.isArray(data.units)) return extractFromPrompt({ prompt });
+      if (Array.isArray(data.facts)) {
+        const factId = data.facts[0].id;
+        const firstBatch = factId === 'F1';
+        return {
+          stories: [
+            {
+              key: 'M01',
+              title: '奖励发放',
+              rules: [{ text: '奖励规则', factIds: [factId] }],
+              acceptance: [{ text: '奖励验收', factIds: [factId] }],
+              dependencies: [],
+            },
+          ],
+          issues: [
+            {
+              question: '奖励是否自动发放？',
+              storyKeys: ['M01'],
+              blocking: firstBatch ? firstBlocking : !firstBlocking,
+            },
+          ],
+        };
+      }
+      return mergeStories(
+        data.partials.flatMap((partial) => partial.stories),
+        data.partials.flatMap((partial) => partial.issues ?? []),
+      );
+    };
+    const chat = scriptedChat(...Array(10).fill(reply));
+    return createDecomposer({ chat, limits: { maxChunkChars: 600 } }).analyze(snapshot);
+  };
+
+  // Two identical issues (same question and storyKeys) arrive from the two fact
+  // batches; only one survives the dedupe, but a blocking copy anywhere must win.
+  for (const firstBlocking of [false, true]) {
+    const draft = await run(firstBlocking);
+    assert.equal(draft.issues.length, 1, `first batch blocking=${firstBlocking}`);
+    const [issue] = draft.issues;
+    assert.match(issue.id, /^Q\d+$/);
+    assert.equal(issue.blocking, true, `first batch blocking=${firstBlocking}`);
+    assert.deepEqual(draft.stories[0].issueIds, [issue.id]);
+    const eligibility = submissionEligibility({
+      draft,
+      snapshot,
+      selectedKeys: ['M01'],
+    });
+    assert.ok(
+      eligibility.blockers.some((blocker) => blocker.code === 'OPEN_BLOCKING_ISSUE'),
+      `first batch blocking=${firstBlocking} must still block submission`,
+    );
+  }
+});
+
 test('a single story larger than the data budget fails as ANALYSIS_LIMIT', async () => {
   const { createDecomposer } = await loadDecomposer();
   const snapshot = makeSnapshot({
@@ -1627,6 +1693,104 @@ test('a single story larger than the data budget fails as ANALYSIS_LIMIT', async
     const size = JSON.stringify(dataOf(call.prompt)).length;
     assert.ok(size <= 600, `captured call carries ${size} data chars`);
   }
+});
+
+test('splitting a multi-story partial into per-story units keeps facts and issues', async () => {
+  const { createDecomposer } = await loadDecomposer();
+  const budget = 1100;
+  const snapshot = makeSnapshot({
+    blocks: [
+      { id: 'b_one', heading: '', kind: 'paragraph', text: '甲'.repeat(570) },
+      { id: 'b_two', heading: '', kind: 'paragraph', text: '乙'.repeat(570) },
+    ],
+    resources: [],
+    comments: [],
+  });
+  const ruleA = `规则A：${'甲'.repeat(120)}`;
+  const ruleB = `规则B：${'乙'.repeat(60)}`;
+  const ruleC = `规则C：${'丙'.repeat(60)}`;
+  const reply = ({ prompt }) => {
+    const data = replyData(prompt);
+    if (Array.isArray(data.units)) return extractFromPrompt({ prompt });
+    if (Array.isArray(data.facts)) {
+      const factId = data.facts[0].id;
+      if (factId === 'F1') {
+        // The issue-bearing multi-story partial; the whole pair of partials no
+        // longer fits, so the merge layer must split it into per-story units.
+        return {
+          stories: [
+            {
+              key: 'M01',
+              title: '入口',
+              rules: [{ text: ruleA, factIds: ['F1'] }],
+              acceptance: [{ text: '验收M01', factIds: ['F1'] }],
+              dependencies: [],
+            },
+            {
+              key: 'M02',
+              title: '周期',
+              rules: [{ text: ruleB, factIds: ['F1'] }],
+              acceptance: [{ text: '验收M02', factIds: ['F1'] }],
+              dependencies: [],
+            },
+          ],
+          issues: [
+            { question: '奖励是否自动发放？', storyKeys: ['M01'], blocking: true },
+            { question: '周期是否需要倒计时？', storyKeys: ['M01', 'M02'], blocking: false },
+          ],
+        };
+      }
+      return {
+        stories: [
+          {
+            key: 'M01',
+            title: '入口',
+            rules: [{ text: ruleA, factIds: ['F2'] }],
+            acceptance: [{ text: '验收M01', factIds: ['F2'] }],
+            dependencies: [],
+          },
+          {
+            key: 'M03',
+            title: '奖励',
+            rules: [{ text: ruleC, factIds: ['F2'] }],
+            acceptance: [{ text: '验收M03', factIds: ['F2'] }],
+            dependencies: [],
+          },
+        ],
+        issues: [],
+      };
+    }
+    return mergeStories(
+      data.partials.flatMap((partial) => partial.stories),
+      data.partials.flatMap((partial) => partial.issues ?? []),
+    );
+  };
+  const chat = scriptedChat(...Array(20).fill(reply));
+  const draft = await createDecomposer({ chat, limits: { maxChunkChars: budget } })
+    .analyze(snapshot);
+
+  for (const [index, call] of chat.calls.entries()) {
+    const size = JSON.stringify(replyData(call.prompt)).length;
+    assert.ok(size <= budget, `call ${index + 1} carries ${size} data chars, budget ${budget}`);
+  }
+  const mergeCalls = chat.calls.filter((call) => (
+    call.prompt.includes('需求聚合') && Array.isArray(replyData(call.prompt).partials)
+  ));
+  assert.equal(mergeCalls.length, 2, 'the split units must need two merge layers');
+  const firstLayer = replyData(mergeCalls[0].prompt).partials;
+  assert.equal(firstLayer.length, 3, 'the multi-story partial must be split into units');
+  assert.ok(firstLayer.every((partial) => partial.stories.length === 1));
+  const issuePartials = firstLayer.filter((partial) => (partial.issues ?? []).length > 0);
+  assert.equal(issuePartials.length, 1);
+  assert.deepEqual(issuePartials[0].issues.map((issue) => issue.id), ['Q1', 'Q2']);
+
+  assert.deepEqual(draft.facts.map((fact) => fact.id), ['F1', 'F2']);
+  assert.deepEqual(draft.issues.map((issue) => issue.id), ['Q1', 'Q2']);
+  assert.deepEqual(
+    draft.stories.map((story) => [story.key, story.issueIds]),
+    [['M01', ['Q1', 'Q2']], ['M02', ['Q2']], ['M03', []]],
+  );
+  assert.equal(validateDraft({ draft, snapshot, actorIds: [] }), draft);
 });
 
 test('an overlong multi-line block splits on a line boundary first', async () => {

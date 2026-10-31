@@ -975,15 +975,22 @@ function issueFingerprint(issue) {
 }
 
 // Server-owned Q ids: exact duplicates (same question and story-key set) are
-// folded once, then ids are assigned in encounter order.
+// folded once, then ids are assigned in encounter order. The first occurrence
+// keeps its text, but a blocking flag on any later copy is preserved: folding
+// must never hide an open blocking question.
 function assignIssueIds(issues, state) {
   const assigned = [];
   for (const issue of issues) {
     const fingerprint = issueFingerprint(issue);
-    if (state.seen.has(fingerprint)) continue;
-    state.seen.add(fingerprint);
-    assigned.push({ ...issue, id: `Q${state.next}` });
+    const existing = state.seen.get(fingerprint);
+    if (existing) {
+      existing.blocking = existing.blocking || issue.blocking;
+      continue;
+    }
+    const assignedIssue = { ...issue, id: `Q${state.next}` };
+    state.seen.set(fingerprint, assignedIssue);
     state.next += 1;
+    assigned.push(assignedIssue);
   }
   return assigned;
 }
@@ -1169,7 +1176,7 @@ export function createDecomposer({ chat, limits = {} } = {}) {
     for (const fact of factUnits) {
       if (!fitsBudget('facts', [fact], context)) fail('ANALYSIS_LIMIT');
     }
-    const issueState = { next: issueStart, seen: new Set() };
+    const issueState = { next: issueStart, seen: new Map() };
     const factGroups = packLayer(factUnits, 'facts', context);
     const singleFactGroup = factGroups.length === 1;
     let results = [];
@@ -1179,7 +1186,7 @@ export function createDecomposer({ chat, limits = {} } = {}) {
         ? (candidate) => {
           // Assign against a local state so a repaired finalize reuses the
           // same ids instead of skipping numbers.
-          const local = { next: issueState.next, seen: new Set() };
+          const local = { next: issueState.next, seen: new Map() };
           const result = finalize({
             ...candidate,
             issues: assignIssueIds(candidate.issues, local),

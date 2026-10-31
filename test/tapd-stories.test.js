@@ -323,15 +323,16 @@ test('child template keeps the marker last when rules overflow the description',
 
 test('clipped descriptions stay well formed around the document link', () => {
   const fillers = [
-    (length) => '字'.repeat(length),
-    (length) => '&'.repeat(length),
-    (length) => '𝌆'.repeat(Math.ceil(length / 2)),
+    { label: 'bmp', step: 1, fill: (length) => '字'.repeat(length) },
+    { label: 'ampersand', step: 1, fill: (length) => '&'.repeat(length) },
+    { label: 'astral', step: 7, fill: (length) => '𝌆'.repeat(Math.ceil(length / 2)) },
   ];
   const tail = `【追踪标识】${MARKER}`;
-  for (const filler of fillers) {
-    for (let length = 4700; length <= 6000; length += 7) {
+  for (const { label, step, fill } of fillers) {
+    for (let length = 4700; length <= 6000; length += step) {
+      const where = `${label} rule length ${length}`;
       const fields = buildChildFields({
-        story: flatStory({ rules: [{ text: filler(length), factIds: ['F1'] }] }),
+        story: flatStory({ rules: [{ text: fill(length), factIds: ['F1'] }] }),
         request: childRequest(),
         target,
         parentId: 'P1',
@@ -339,16 +340,24 @@ test('clipped descriptions stay well formed around the document link', () => {
         marker: MARKER,
       });
       const description = fields.description;
-      assert.ok(description.length <= 6000, `limit at rule length ${length}`);
-      assert.deepEqual(description.split('<br />').at(-1), tail, `marker last at ${length}`);
+      assert.ok(description.length <= 6000, `limit at ${where}`);
+      assert.deepEqual(description.split('<br />').at(-1), tail, `marker last at ${where}`);
       const body = description.slice(0, description.length - tail.length - '<br />'.length);
-      assert.ok(!/&[A-Za-z#0-9]*$/.test(body), `entity fragment at ${length}`);
-      assert.ok(!/<[^>]*$/.test(body), `tag fragment at ${length}`);
+      assert.ok(!/&[A-Za-z#0-9]*$/.test(body), `entity fragment at ${where}`);
+      assert.ok(!/<[^>]*$/.test(body), `tag fragment at ${where}`);
       const opens = (description.match(/<a /g) ?? []).length;
       const closes = (description.match(/<\/a>/g) ?? []).length;
-      assert.equal(opens, closes, `balanced anchors at ${length}`);
-      assert.ok(!/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/.test(description), `lone high at ${length}`);
-      assert.ok(!/[^\uD800-\uDBFF][\uDC00-\uDFFF]/.test(description), `lone low at ${length}`);
+      assert.equal(opens, closes, `balanced anchors at ${where}`);
+      const tags = description.match(/<a |<\/a>/g) ?? [];
+      let depth = 0;
+      for (const tag of tags) {
+        depth += tag === '<a ' ? 1 : -1;
+        assert.ok(depth >= 0, `stray closer at ${where}`);
+      }
+      assert.equal(depth, 0, `anchor left open at ${where}`);
+      assert.ok(!/^<\/a>/.test(description), `leading closer at ${where}`);
+      assert.ok(!/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/.test(description), `lone high at ${where}`);
+      assert.ok(!/[^\uD800-\uDBFF][\uDC00-\uDFFF]/.test(description), `lone low at ${where}`);
     }
   }
 });

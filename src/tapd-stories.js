@@ -101,17 +101,22 @@ function trimFragments(text) {
     .replace(/(?:<br \/>)+$/, '');
 }
 
+function openAnchors(text) {
+  return (text.match(/<a /g) ?? []).length - (text.match(/<\/a>/g) ?? []).length;
+}
+
 function clipHtml(text, max) {
   if (text.length <= max) return text;
   let cut = text.slice(0, Math.max(0, max));
   if (/[\uD800-\uDBFF]$/.test(cut)) cut = cut.slice(0, -1);
   cut = trimFragments(cut);
-  const opens = (cut.match(/<a /g) ?? []).length;
-  const closes = (cut.match(/<\/a>/g) ?? []).length;
-  const missing = Math.max(0, opens - closes);
+  const missing = openAnchors(cut);
   if (missing === 0) return cut;
   const closers = '</a>'.repeat(missing);
-  return `${trimFragments(cut.slice(0, Math.max(0, max - closers.length)))}${closers}`;
+  const body = trimFragments(cut.slice(0, Math.max(0, max - closers.length)));
+  // The paid trim can drop the opening tag itself, so recount before closing.
+  const stillMissing = Math.min(missing, openAnchors(body));
+  return `${body}${'</a>'.repeat(stillMissing)}`;
 }
 
 function assembleDescription(lines, marker) {

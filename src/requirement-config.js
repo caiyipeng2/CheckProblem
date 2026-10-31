@@ -22,6 +22,9 @@ function stringList(value, where, { allowEmpty }) {
   return value.map((item) => requiredString(item, where));
 }
 
+const HOSTNAME = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*$/;
+const MAX_HOSTNAME_LENGTH = 253;
+
 function documentHosts(raw) {
   const where = 'documentHosts';
   if (!Array.isArray(raw) || raw.length === 0) {
@@ -30,8 +33,9 @@ function documentHosts(raw) {
   const hosts = raw.map((value) => {
     if (typeof value !== 'string') fail(where, 'must be a non-empty array of bare hostnames');
     const host = value.trim().toLowerCase();
-    // No scheme, path, port or wildcard: a link's host must equal one of these exactly.
-    if (!/^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$/.test(host)) {
+    // No scheme, path, port or wildcard: a link's host must equal one of these
+    // exactly, so only a sequence of DNS labels is a usable allowlist entry.
+    if (host.length > MAX_HOSTNAME_LENGTH || !HOSTNAME.test(host)) {
       fail(where, 'must be a non-empty array of bare hostnames');
     }
     return host;
@@ -41,20 +45,29 @@ function documentHosts(raw) {
 
 function modelAttempt(raw, analyze) {
   const where = 'modelAttempt';
-  if (!Array.isArray(analyze) || !Number.isInteger(raw) || raw < 0 || raw >= analyze.length) {
+  const attempts = Array.isArray(analyze) ? analyze : analyze?.attempts;
+  if (!Array.isArray(attempts) || !Number.isInteger(raw) || raw < 0 || raw >= attempts.length) {
     fail(where, 'must be an integer index into analyze');
   }
-  const attempt = analyze[raw];
+  const attempt = attempts[raw];
   if (!attempt || typeof attempt !== 'object' || Array.isArray(attempt)) {
     fail(where, 'must reference a chat attempt');
   }
   if (typeof attempt.command === 'string' && attempt.command !== '') {
     fail(where, 'must reference a chat attempt');
   }
+  // A chat endpoint must be declared in full. In particular apiKeyEnv must be
+  // present and empty: an absent value would make resolveApiKey fall back to
+  // DEEPSEEK_API_KEY in the process environment.
+  if (attempt.kind !== 'chat'
+    || typeof attempt.baseUrl !== 'string' || attempt.baseUrl.trim() === ''
+    || typeof attempt.model !== 'string' || attempt.model.trim() === '') {
+    fail(where, 'must reference a chat attempt with baseUrl and model');
+  }
   if (typeof attempt.apiKeyFile !== 'string' || attempt.apiKeyFile.trim() === '') {
     fail(where, 'must reference a chat attempt with apiKeyFile');
   }
-  if ((attempt.apiKeyEnv ?? '') !== '') {
+  if (attempt.apiKeyEnv !== '') {
     fail(where, "must use apiKeyEnv:''");
   }
   return attempt;

@@ -303,17 +303,22 @@ test('a rejected tapd field names its key without echoing the value', (t) => {
   assert.equal(message.includes('机'.repeat(5)), false);
 });
 
-function requirementConfig(t, includeBlock = true) {
-  const dir = mkdtempSync(join(tmpdir(), 'cfg-requirements-'));
-  t.after(() => rmSync(dir, { recursive: true, force: true }));
-  const file = join(dir, 'config.json');
-  const value = {
+function requirementValue() {
+  return {
     chatId: 'oc_x',
     selfOpenId: 'ou_x',
     projects: [{ id: 'weapon', name: '武器店', url: 'https://example.com/w.git' }],
     tapd: { tokenFile: 'C:/secrets/tapd.token', workspaces: { weapon: { workspaceId: '59180547' } } },
     analyze: {
-      attempts: [{ label: 'chat', model: 'vision', apiKeyFile: 'C:/secrets/chat.key', apiKeyEnv: '', timeoutSec: 120 }],
+      attempts: [{
+        kind: 'chat',
+        label: 'chat',
+        baseUrl: 'https://api.example.com/v1',
+        model: 'vision',
+        apiKeyFile: 'C:/secrets/chat.key',
+        apiKeyEnv: '',
+        timeoutSec: 120,
+      }],
     },
     requirements: {
       allowedSenders: ['ou_test'],
@@ -331,8 +336,13 @@ function requirementConfig(t, includeBlock = true) {
       },
     },
   };
-  if (!includeBlock) delete value.requirements;
-  writeFileSync(file, JSON.stringify(value));
+}
+
+function requirementConfig(t) {
+  const dir = mkdtempSync(join(tmpdir(), 'cfg-requirements-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const file = join(dir, 'config.json');
+  writeFileSync(file, JSON.stringify(requirementValue()));
   return { dir, file };
 }
 
@@ -351,8 +361,21 @@ test('loadConfig normalizes a requirements block and derives its paths', (t) => 
 });
 
 test('a config without a requirements block does not enable the feature', (t) => {
-  const { file } = requirementConfig(t, false);
-  const config = loadConfig(file);
-  assert.equal(Object.hasOwn(config, 'requirements'), false);
-  assert.equal(config.requirements, undefined);
+  const dir = mkdtempSync(join(tmpdir(), 'cfg-requirements-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const withFile = join(dir, 'with.json');
+  const withoutFile = join(dir, 'without.json');
+  writeFileSync(withFile, JSON.stringify(requirementValue()));
+  const withoutValue = requirementValue();
+  delete withoutValue.requirements;
+  writeFileSync(withoutFile, JSON.stringify(withoutValue));
+
+  const withRequirements = loadConfig(withFile);
+  const without = loadConfig(withoutFile);
+  assert.equal(Object.hasOwn(without, 'requirements'), false);
+  assert.equal(without.requirements, undefined);
+  assert.deepEqual(without.analyze, withRequirements.analyze,
+    'the requirements path must not reshape analyze');
+  delete withRequirements.requirements;
+  assert.deepEqual(withRequirements, without);
 });

@@ -14,7 +14,13 @@ const tapd = {
   },
 };
 const CHAT_ATTEMPT = {
-  label: 'chat', model: 'vision', apiKeyFile: 'C:/secrets/chat.key', apiKeyEnv: '', timeoutSec: 120,
+  kind: 'chat',
+  label: 'chat',
+  baseUrl: 'https://api.example.com/v1',
+  model: 'vision',
+  apiKeyFile: 'C:/secrets/chat.key',
+  apiKeyEnv: '',
+  timeoutSec: 120,
 };
 const analyze = [
   CHAT_ATTEMPT,
@@ -46,6 +52,12 @@ function messageOf(fn) {
     return err.message;
   }
   assert.fail('expected configuration to be rejected');
+}
+
+function withoutField(attempt, key) {
+  const copy = { ...attempt };
+  delete copy[key];
+  return copy;
 }
 
 function assertFieldError(fn, field, forbidden = []) {
@@ -141,6 +153,10 @@ test('documentHosts reject non-allowlisted or malformed entries without echoing 
     ['*.feishu.cn'],
     ['user@hellowd.feishu.cn'],
     ['hello world'],
+    ['a..b'],
+    ['-a.com'],
+    ['a-.com'],
+    ['a.com.'],
     ['hellowd.feishu.cn', 42],
   ]) {
     const raw = base();
@@ -171,9 +187,28 @@ test('modelAttempt rejects command-type attempts', () => {
   );
 });
 
+test('modelAttempt must be an explicit file-only chat endpoint', () => {
+  for (const attempt of [
+    withoutField(CHAT_ATTEMPT, 'apiKeyEnv'),
+    { ...CHAT_ATTEMPT, apiKeyEnv: null },
+    withoutField(CHAT_ATTEMPT, 'kind'),
+    { ...CHAT_ATTEMPT, kind: 'codex' },
+    withoutField(CHAT_ATTEMPT, 'baseUrl'),
+    { ...CHAT_ATTEMPT, baseUrl: '   ' },
+    withoutField(CHAT_ATTEMPT, 'model'),
+    { ...CHAT_ATTEMPT, model: '  ' },
+  ]) {
+    assertFieldError(
+      () => normalizeRequirements(base(), options({ analyze: [attempt] })),
+      'modelAttempt',
+      ['api.example.com', 'vision', 'C:/secrets/chat.key', 'OPENAI_API_KEY', 'codex'],
+    );
+  }
+});
+
 test('modelAttempt requires an apiKeyFile and the empty apiKeyEnv form', () => {
   const missing = base();
-  const missingKey = { label: 'no-key', model: 'm', apiKeyEnv: '' };
+  const missingKey = { ...withoutField(CHAT_ATTEMPT, 'apiKeyFile'), label: 'no-key' };
   assertFieldError(
     () => normalizeRequirements(missing, options({ analyze: [missingKey] })),
     'modelAttempt',
@@ -187,6 +222,17 @@ test('modelAttempt requires an apiKeyFile and the empty apiKeyEnv form', () => {
     'modelAttempt',
     ['OPENAI_API_KEY', 'C:/secrets/chat.key'],
   );
+});
+
+test('analyze may be the resolved attempts array or its config object', () => {
+  const attempt = { ...CHAT_ATTEMPT };
+  const direct = normalizeRequirements(base(), options({ analyze: [attempt] }));
+  assert.equal(direct.attempt, attempt);
+  assert.equal(direct.modelAttempt, 0);
+
+  const wrapped = normalizeRequirements(base(), options({ analyze: { attempts: [attempt] } }));
+  assert.equal(wrapped.attempt, attempt);
+  assert.equal(wrapped.modelAttempt, 0);
 });
 
 test('modelAttempt without an attempts list is rejected', () => {

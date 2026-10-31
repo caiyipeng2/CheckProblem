@@ -34,6 +34,8 @@ test('document links reject untrusted hosts, credentials, schemes and ports', ()
     'https://u:p@hellowd.feishu.cn/docx/abc',
     'http://hellowd.feishu.cn/docx/abc',
     'https://hellowd.feishu.cn:8443/docx/abc',
+    'https://hellowd.feishu.cn:443/docx/abc',
+    'https://@hellowd.feishu.cn/docx/abc',
     'not a url',
     '',
   ]) {
@@ -100,6 +102,16 @@ test('a plain document link without the bot mention never starts a split', () =>
     startOptions,
   ), null);
   assert.equal(classifyRequirementMessage(undefined, startOptions), null);
+});
+
+test('the start command must be the prefix of the cleaned message', () => {
+  for (const text of [
+    `@_user_1 不要拆分需求 ${DOCX}`,
+    `@_user_1 请参考拆分需求文档 ${DOCX}`,
+  ]) {
+    const message = textMsg(text, { mentions: [MENTION] });
+    assert.equal(classifyRequirementMessage(message, startOptions), null, text);
+  }
 });
 
 test('a post extracts a link from an a node and the mention from an at node', () => {
@@ -193,6 +205,13 @@ test('a request id only matches on whole-token boundaries', () => {
   assert.equal(resolveRequestReference(
     textMsg('please r1'), [{ id: 'r1', triggerMessageId: 'om_t', cardMessageIds: [] }],
   ), 'r1');
+});
+
+test('a request id that only appears inside a URL is not a reference', () => {
+  assert.equal(resolveRequestReference(
+    textMsg('see https://example.com/requests/r1'),
+    [{ id: 'r1', triggerMessageId: 'om_t', cardMessageIds: [] }],
+  ), null);
 });
 
 test('an ambiguous edit reference throws AMBIGUOUS_REQUEST', () => {

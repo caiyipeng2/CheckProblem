@@ -101,6 +101,13 @@ function textMentionsId(text, id) {
 
 export function normalizeDocumentLink(rawUrl, { hosts } = {}) {
   if (typeof rawUrl !== 'string') throw new Error('UNTRUSTED_DOCUMENT_URL');
+  // new URL drops a default port and empty userinfo, so inspect the raw
+  // authority: allowlisted hosts are DNS names, and any ':' or '@' there means
+  // a port, userinfo or IPv6 literal. Parsed checks below remain as backup.
+  const authority = /^[A-Za-z][A-Za-z0-9+.-]*:\/\/([^/?#]*)/.exec(rawUrl)?.[1];
+  if (authority === undefined || authority.includes(':') || authority.includes('@')) {
+    throw new Error('UNTRUSTED_DOCUMENT_URL');
+  }
   let url;
   try {
     url = new URL(rawUrl);
@@ -122,7 +129,9 @@ export function normalizeDocumentLink(rawUrl, { hosts } = {}) {
 }
 
 export function resolveRequestReference(message, requests) {
-  const { text } = messageParts(message);
+  const { text: rawText } = messageParts(message);
+  // An id embedded in a link is part of the attachment, not a reference.
+  const text = rawText.replace(URL_PATTERN, ' ');
   const matched = new Set();
   const threadIds = new Set(
     [message?.parent_id, message?.root_id]
@@ -170,7 +179,7 @@ export function classifyRequirementMessage(message, options = {}) {
     };
   }
 
-  if (!parts.text.includes(START_COMMAND)) return null;
+  if (!cleaned.startsWith(START_COMMAND)) return null;
   const documents = gatherDocuments(parts, hosts);
   return documents.length > 0 ? { kind: 'start', documents } : null;
 }

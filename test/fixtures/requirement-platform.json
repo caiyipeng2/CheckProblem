@@ -1,0 +1,211 @@
+{
+  "$note": "Synthetic protocol shapes captured for the requirement-decomposition feature. Every value is invented or masked; no real business text, document content, tokens, or signed URLs. Consumers: Tasks 2, 5, 7, 8, 9, 10 tests.",
+  "tapd": {
+    "envelope": {
+      "ok": { "status": 1, "data": "<array|object>", "info": "success" },
+      "error": { "status": 0, "info": "<message>", "data": [] }
+    },
+    "storyCreate": {
+      "request": {
+        "method": "POST",
+        "path": "/stories",
+        "contentType": "application/x-www-form-urlencoded",
+        "auth": "Authorization: Bearer <personal-access-token>",
+        "required": ["workspace_id", "name"],
+        "optional": [
+          "parent_id",
+          "workitem_type_id",
+          "templated_id",
+          "description",
+          "owner",
+          "cc",
+          "creator",
+          "developer",
+          "iteration_id",
+          "priority_label",
+          "module",
+          "version",
+          "category_id",
+          "label",
+          "is_apply_template_default_value"
+        ],
+        "notes": [
+          "parent_id, workitem_type_id, templated_id are integers",
+          "iteration_id is a string and defaults to '0'",
+          "priority is deprecated in favor of priority_label",
+          "no idempotency key; a retried POST creates another story"
+        ]
+      },
+      "response": {
+        "status": 1,
+        "data": {
+          "Story": {
+            "id": "1000000000000000001",
+            "workitem_type_id": "1000000000000000025",
+            "name": "[synthetic] sample child story",
+            "description": "<p>[synthetic] description</p>",
+            "workspace_id": "1000001",
+            "creator": "synthetic_user",
+            "created": "2026-01-01 10:00:00",
+            "modified": "2026-01-01 10:00:00",
+            "status": "planning",
+            "owner": "",
+            "cc": "",
+            "iteration_id": "0",
+            "templated_id": "1000000000000000039",
+            "parent_id": "0",
+            "children_id": "|",
+            "ancestor_id": "1000000000000000001",
+            "level": "0",
+            "created_from": "api"
+          }
+        },
+        "info": "success"
+      }
+    },
+    "storyRead": {
+      "byId": {
+        "path": "/stories",
+        "params": { "workspace_id": "<id>", "id": "<id[,id2,...]>", "fields": "<comma,separated>" },
+        "responseItem": { "data": [{ "Story": { "id": "1000000000000000001", "name": "[synthetic]", "parent_id": "0", "children_id": "|1000000000000000002|", "ancestor_id": "1000000000000000001", "level": "0" } }] },
+        "commaIdsReturnMultiple": true
+      },
+      "byParent": {
+        "path": "/stories",
+        "params": { "workspace_id": "<id>", "parent_id": "<id>", "page": 1, "limit": 200, "fields": "<comma,separated>" },
+        "paging": {
+          "maxLimitObserved": 200,
+          "terminatesOnEmptyPage": true,
+          "declaredOrderUnstable": true,
+          "childrenOfParent": 10,
+          "page1Count": 10,
+          "page2Count": 0
+        }
+      },
+      "count": {
+        "path": "/stories/count",
+        "params": { "workspace_id": "<id>", "parent_id": "<id>" },
+        "response": { "status": 1, "data": { "count": 10 }, "info": "success" }
+      }
+    },
+    "observed": {
+      "parent": {
+        "level": "0",
+        "ancestor_id": "self",
+        "children_id": "||<child1>|<child2>|<child3>",
+        "iteration_id": "0"
+      },
+      "child": {
+        "level": "1",
+        "parent_id": "<parent id>",
+        "ancestor_id": "<parent id>",
+        "children_id": "|"
+      },
+      "fieldCountPerStory": 260,
+      "descriptionIsHtml": true,
+      "workitemTypes": {
+        "weapon": { "parent": "1159180547001000025", "child": "1159180547001000027" },
+        "gear": { "parent": "1147943302001000056", "child": "1147943302001000060" }
+      },
+      "templates": {
+        "weaponDefault": "1159180547001000039",
+        "gearDefault": "1147943302001000077"
+      },
+      "deniedForThisAccount": [
+        "/stories/get_story_fields_lable",
+        "/stories/get_story_custom_fields_settings"
+      ]
+    }
+  },
+  "document": {
+    "fetchEnvelope": {
+      "ok": true,
+      "identity": "user",
+      "data": {
+        "document": {
+          "content": "<title id=\"synthetic\">[synthetic] plan doc</title><h1 id=\"synthetic-h1\">[synthetic] heading</h1><p id=\"synthetic-p\">[synthetic] paragraph</p>",
+          "document_id": "syntheticDocToken",
+          "revision_id": 1,
+          "reference_map": {}
+        }
+      }
+    },
+    "detailModes": {
+      "simple": { "contentChars": 13790, "contentBytes": 26110, "hasResourceTags": false },
+      "full": { "contentChars": 21698, "contentBytes": 34018, "hasResourceTags": true, "hasAltText": true },
+      "outline": { "contentBytes": 904, "params": ["--scope", "outline", "--max-depth", "3"] }
+    },
+    "blocks": {
+      "title": { "tag": "title", "attrs": ["id"], "body": "text" },
+      "heading": { "tag": "h1|h2|h3", "attrs": ["id"], "body": "text or inline tags" },
+      "paragraph": { "tag": "p", "attrs": ["id"], "body": "text or inline tags" },
+      "list": { "tag": "ol|li", "attrs": ["id"] },
+      "table": { "tag": "table", "attrs": ["id"], "children": "colgroup/col/tbody/tr/td" },
+      "image": { "tag": "img", "attrs": ["id", "name", "alt", "token", "width", "height", "origin-width", "origin-height"] },
+      "whiteboard": { "tag": "whiteboard", "attrs": ["id", "token"] },
+      "sheet": { "tag": "sheet", "attrs": ["id", "sheet-id", "token"] },
+      "file": { "tag": "source", "attrs": ["name", "mime", "size", "token"] },
+      "video": { "tag": "video", "attrs": ["id", "token"] },
+      "anchor": { "tag": "a", "attrs": ["href"], "body": "text", "note": "not present in the sample doc; Feishu block schema" }
+    },
+    "countsInSample": { "paragraphs": 74, "images": 24, "whiteboards": 1, "sheets": 1, "files": 1, "tables": 1, "anchors": 0 },
+    "resources": {
+      "image": {
+        "command": ["docs", "+media-preview", "--token", "<img token>", "--output", "./image", "--as", "user", "--json", "--overwrite"],
+        "response": { "ok": true, "data": { "content_type": "image/png", "saved_path": "./image.png", "size_bytes": 167041 } },
+        "msApprox": 1600,
+        "mediaDownload403": true
+      },
+      "whiteboard": {
+        "preview": { "command": ["whiteboard", "+export", "--whiteboard-token", "<token>", "--output-type", "preview", "--output", "./wb", "--as", "user", "--json"], "bytes": 674237, "contentType": "image/jpeg" },
+        "raw": { "command": ["whiteboard", "+export", "--whiteboard-token", "<token>", "--output-type", "raw", "--output", "./wb-nodes.json", "--as", "user", "--json"], "bytes": 63859, "topKey": "nodes", "nodeCount": 55 }
+      },
+      "embeddedSheet": {
+        "command": ["sheets", "+csv-get", "--spreadsheet-token", "<token>", "--sheet-id", "<sheet id>", "--max-chars", "30000", "--as", "user", "--json"],
+        "responseDataKeys": ["actual_range", "annotated_csv", "col_count", "col_indices", "current_region", "has_more", "revision", "row_count", "row_indices", "warning_message"],
+        "sample": { "actualRange": "A1:D17", "annotatedCsvChars": 1063, "hasMore": false }
+      },
+      "file": {
+        "command": ["docs", "+media-preview", "--token", "<file token>", "--output", "./attachment", "--as", "user", "--json", "--overwrite"],
+        "response": { "ok": true, "data": { "content_type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "saved_path": "./attachment.xlsx", "size_bytes": 761147 } },
+        "driveDownload404": true
+      },
+      "comments": {
+        "command": ["drive", "+list-comments", "--url", "<docx url>", "--as", "user", "--json"],
+        "dataKeys": ["count", "file_token", "file_type", "has_more", "items", "page_token"],
+        "itemKeys": ["comment_id", "create_time", "is_solved", "is_whole", "quote", "reply_list", "solver_user_id", "update_time", "user_id"],
+        "replyKeys": ["content", "create_time", "reply_id", "update_time", "user_id"]
+      },
+      "wiki": {
+        "inspect": { "command": ["drive", "+inspect", "--url", "<wiki url>", "--as", "user", "--json"], "dataKeys": ["input_url", "title", "token", "type", "url", "wiki_node"] },
+        "fetch": { "command": ["docs", "+fetch", "--doc", "<wiki url>", "--as", "user", "--detail", "simple", "--json"], "contentIsFragment": true, "documentIdDiffersFromNodeToken": true },
+        "listing": { "spaces": ["wiki", "+space-list"], "nodes": ["wiki", "+node-list", "--space-id", "<id>", "--page-size", "50"] }
+      },
+      "video": { "reader": null, "status": "blocked", "note": "no verified frame/transcript reader in this runtime" }
+    }
+  },
+  "message": {
+    "reply": {
+      "message_id": "om_synthetic_reply",
+      "parent_id": "om_synthetic_root",
+      "root_id": "om_synthetic_root",
+      "thread_id": null,
+      "reply_in_thread": false,
+      "observed": "all 33 replies in the self-test chat had parent_id == root_id; thread_id absent in all 60 scanned messages"
+    },
+    "post": {
+      "msg_type": "post",
+      "bodyKeys": ["title", "content", "content_v2"],
+      "bodyContent": {
+        "title": "[synthetic] post title",
+        "content": [
+          [
+            { "tag": "text", "text": "[synthetic] see " },
+            { "tag": "a", "text": "[synthetic] doc link", "href": "https://example.feishu.cn/docx/syntheticToken" }
+          ]
+        ]
+      },
+      "extraction": { "currentExtractPlainTextDropsAnchor": true, "syntheticAnchorChars": 9 }
+    }
+  }
+}

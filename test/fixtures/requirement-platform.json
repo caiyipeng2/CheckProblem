@@ -87,7 +87,7 @@
       "nameSearch": {
         "path": "/stories",
         "params": { "workspace_id": "<id>", "name": "<substring>", "page": 1, "limit": 200 },
-        "behavior": "substring match; an exact parent name can return several ids, so filter for exact name and parent_id == '0' client-side",
+        "behavior": "substring match; the exact-name query returned one hit while the substring query returned several ids (parent and children), so filter for exact name and parent_id == '0' client-side",
         "verified": { "exactQueryCount": 1, "partialQueryCount": 9 }
       },
       "count": {
@@ -149,7 +149,7 @@
       "paragraph": { "tag": "p", "attrs": ["id"], "body": "text or inline tags" },
       "list": { "tag": "ol|li", "attrs": ["id"] },
       "table": { "tag": "table", "attrs": ["id"], "children": "colgroup/col/tbody/tr/td" },
-      "image": { "tag": "img", "attrs": ["id", "name", "alt", "height", "mime", "scale", "src", "width"], "mediaTokenAttr": "src", "note": "the media token is the value of src; there is no token attribute" },
+      "image": { "tag": "img", "attrs": ["id", "name", "alt", "height", "mime", "scale", "src", "width", "comment-refs"], "mediaTokenAttr": "src", "note": "the media token is the value of src; there is no token attribute; comment-refs appears only on images that carry comments" },
       "whiteboard": { "tag": "whiteboard", "attrs": ["id", "token"] },
       "sheet": { "tag": "sheet", "attrs": ["id", "sheet-id", "token"] },
       "xlsxSource": { "tag": "source", "attrs": ["name", "mime", "size", "token"], "note": "uploaded spreadsheet attachment; no id" },
@@ -189,14 +189,14 @@
         "command": ["drive", "+list-comments", "--url", "<docx url>", "--as", "user", "--json"],
         "dataKeys": ["count", "file_token", "file_type", "has_more", "items", "page_token"],
         "itemKeys": ["comment_id", "create_time", "extra", "is_solved", "is_whole", "quote", "reply_list", "solver_user_id", "update_time", "user_id"],
-        "replyKeys": ["content", "create_time", "reply_id", "update_time", "user_id"]
+        "replyKeys": ["content", "create_time", "extra", "reply_id", "update_time", "user_id"]
       },
       "wiki": {
         "inspect": { "command": ["drive", "+inspect", "--url", "<wiki url>", "--as", "user", "--json"], "dataKeys": ["input_url", "title", "token", "type", "url", "wiki_node"] },
         "fetch": { "command": ["docs", "+fetch", "--doc", "<wiki url>", "--as", "user", "--detail", "full", "--json"], "returnsFullContent": true, "outlineScopeReturnsFragment": true, "documentIdDiffersFromNodeToken": true },
         "listing": { "spaces": ["wiki", "+space-list"], "nodes": ["wiki", "+node-list", "--space-id", "<id>", "--page-size", "50"] }
       },
-      "video": { "reader": null, "status": "blocked", "note": "video is an uploaded source with mime video/mp4; no verified frame/transcript reader, so it stays pending for manual review" }
+      "video": { "reader": null, "status": "pending", "note": "video is an uploaded source with mime video/mp4; no verified frame/transcript reader, so it stays pending for manual review" }
     }
   },
   "message": {

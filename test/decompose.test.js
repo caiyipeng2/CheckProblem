@@ -130,6 +130,28 @@ function aggregateFromPrompt({ prompt }) {
   );
 }
 
+function singleFeatureAggregation({ prompt }) {
+  const data = dataOf(prompt);
+  if (Array.isArray(data.facts)) {
+    const factIds = data.facts.map((fact) => fact.id);
+    return {
+      stories: [
+        {
+          key: 'M01',
+          title: '合并需求',
+          rules: [{ text: '合并规则', factIds }],
+          acceptance: [{ text: '合并验收', factIds }],
+        },
+      ],
+      issues: [],
+    };
+  }
+  return mergeStories(
+    (data.partials ?? []).flatMap((partial) => partial.stories),
+    (data.partials ?? []).flatMap((partial) => partial.issues),
+  );
+}
+
 function pipelineReply({ prompt, images }) {
   const data = dataOf(prompt);
   return Array.isArray(data.units)
@@ -418,6 +440,10 @@ test('analyze keeps the tail block fact and assigns fact ids on the server', asy
   assert.ok(draft.stories.every((story) => story.owner === null));
   assert.ok(draft.stories.every((story) => story.disposition === 'proposed'));
   assert.equal(validateDraft({ draft, snapshot, actorIds: [] }), draft);
+
+  const extractionUnits = dataOf(chat.calls[0].prompt).units.map((unit) => unit.id);
+  assert.ok(extractionUnits.includes('last-block'), 'the extraction data must carry the tail block');
+  assert.ok(extractionUnits.includes('b_inject'));
 
   const forged = structuredClone(draft);
   forged.facts[0].sourceIds = ['b_unknown'];
@@ -956,11 +982,11 @@ test('small budgets force multi-level merging without losing any fact text', asy
     resources: [],
     comments: [],
   });
-  // Two 800-char blocks split into four extraction chunks; dynamic aggregation
-  // replies cover any number of merge layers.
+  // Two 800-char blocks split into four extraction chunks; a single feature key
+  // keeps the merge layers reducible under the hard data budget.
   const chat = scriptedChat(
     ...Array(4).fill(extractFromPrompt),
-    ...Array(20).fill(aggregateFromPrompt),
+    ...Array(20).fill(singleFeatureAggregation),
   );
   const draft = await createDecomposer({
     chat,
@@ -1207,47 +1233,71 @@ test('a single overlong block is split inside the chunk budget with media on par
   assert.equal(validateDraft({ draft, snapshot, actorIds: [] }), draft);
 });
 
-test('a multi-batch aggregation may only cite facts from its own batch', async () => {
+test('a batch may not cite a fact that only exists in another batch', async () => {
   const { createDecomposer } = await loadDecomposer();
   const snapshot = makeSnapshot({
     blocks: [
-      { id: 'b_one', heading: '', kind: 'paragraph', text: '甲'.repeat(600) },
-      { id: 'b_two', heading: '', kind: 'paragraph', text: '乙'.repeat(600) },
+      { id: 'b_one', heading: '', kind: 'paragraph', text: '甲'.repeat(300) },
+      { id: 'b_two', heading: '', kind: 'paragraph', text: '乙'.repeat(300) },
     ],
     resources: [],
     comments: [],
   });
-  const invalidReply = (factId) => ({
+  const limits = { maxChunkChars: 600 };
+  const withFact = (factId) => ({
     stories: [
       {
         key: 'M01',
         title: '错误引用',
-        rules: [{ text: '错误规则', factIds: [factId, 'F999'] }],
+        rules: [{ text: '错误规则', factIds: [factId] }],
         acceptance: [{ text: '错误验收', factIds: [factId] }],
       },
     ],
     issues: [],
   });
-  let batchFactId = null;
-  const foreign = ({ prompt, images }) => {
-    if (prompt.includes('上一条回复不符合')) return invalidReply(batchFactId);
+
+  // Control run: two batches, and F2 is a valid fact id of the second batch only.
+  const control = scriptedChat(...Array(20).fill(({ prompt, images }) => {
     const data = dataOf(prompt);
     if (Array.isArray(data.units)) return extractFromPrompt({ prompt, images });
-    batchFactId = data.facts[0].id;
-    return invalidReply(batchFactId);
-  };
-  const chat = scriptedChat(...Array(40).fill(foreign));
+    return aggregateFromPrompt({ prompt });
+  }));
+  const draft = await createDecomposer({ chat: control, limits }).analyze(snapshot);
+  assert.deepEqual(draft.facts.map((fact) => fact.id), ['F1', 'F2']);
+  const controlBatches = control.calls
+    .filter((call) => call.prompt.includes('需求聚合'))
+    .map((call) => dataOf(call.prompt))
+    .filter((data) => Array.isArray(data.facts))
+    .map((data) => data.facts.map((fact) => fact.id));
+  assert.deepEqual(controlBatches, [['F1'], ['F2']]);
+
+  const crossBatch = scriptedChat(...Array(20).fill(({ prompt, images }) => {
+    if (prompt.includes('上一条回复不符合')) return withFact('F2');
+    const data = dataOf(prompt);
+    if (Array.isArray(data.units)) return extractFromPrompt({ prompt, images });
+    if (Array.isArray(data.facts)) {
+      // F1 is this batch's fact; F2 belongs to the next batch.
+      const ids = data.facts.map((fact) => fact.id);
+      return withFact(ids.includes('F2') ? 'F1' : 'F2');
+    }
+    return withFact('F2');
+  }));
   await assert.rejects(
-    () => createDecomposer({ chat, limits: { maxChunkChars: 600 } }).analyze(snapshot),
+    () => createDecomposer({ chat: crossBatch, limits }).analyze(snapshot),
     (error) => {
       assert.equal(error.message, 'ANALYSIS_INVALID');
       assert.equal(error.cause, 'UNKNOWN_FACT');
       return true;
     },
   );
-  const extractionCalls = chat.calls.filter((call) => call.prompt.includes('事实提取'));
-  assert.equal(extractionCalls.length, 2);
-  assert.equal(chat.calls.length, 4);
+  assert.equal(crossBatch.calls.filter((call) => call.prompt.includes('事实提取')).length, 1);
+  const firstBatch = crossBatch.calls.find((call) => (
+    !call.prompt.includes('上一条回复不符合') && Array.isArray(dataOf(call.prompt).facts)
+  ));
+  assert.deepEqual(dataOf(firstBatch.prompt).facts.map((fact) => fact.id), ['F1']);
+  const repair = crossBatch.calls[crossBatch.calls.length - 1];
+  assert.ok(repair.prompt.includes('错误码 UNKNOWN_FACT'));
+  assert.equal(crossBatch.calls.length, 3);
 });
 
 test('a comment that lands in its own chunk keeps its comment source', async () => {
@@ -1262,7 +1312,7 @@ test('a comment that lands in its own chunk keeps its comment source', async () 
   });
   const chat = scriptedChat(
     ...Array(3).fill(extractFromPrompt),
-    ...Array(10).fill(aggregateFromPrompt),
+    ...Array(20).fill(singleFeatureAggregation),
   );
   const draft = await createDecomposer({
     chat,
@@ -1276,6 +1326,126 @@ test('a comment that lands in its own chunk keeps its comment source', async () 
   const commentFact = draft.facts.find((fact) => fact.kind === 'comment');
   assert.ok(commentFact);
   assert.deepEqual(commentFact.sourceIds, ['c_1']);
+});
+
+test('no aggregation call exceeds the data budget and every fact id survives every layer', async () => {
+  const { createDecomposer } = await loadDecomposer();
+  const budget = 600;
+  const blocks = Array.from({ length: 5 }, (_, index) => ({
+    id: `b_budget_${index + 1}`,
+    heading: '',
+    kind: 'paragraph',
+    text: `[M01] 规则${index + 1}：${'说明'.repeat(160)}`,
+  }));
+  const snapshot = makeSnapshot({ blocks, resources: [], comments: [] });
+  const chat = scriptedChat(
+    ...Array(5).fill(extractFromPrompt),
+    ...Array(20).fill(aggregateFromPrompt),
+  );
+  const draft = await createDecomposer({ chat, limits: { maxChunkChars: budget } }).analyze(snapshot);
+
+  const aggregationCalls = chat.calls.filter((call) => call.prompt.includes('需求聚合'));
+  assert.ok(aggregationCalls.length >= 2);
+  for (const call of aggregationCalls) {
+    const size = JSON.stringify(dataOf(call.prompt)).length;
+    assert.ok(size <= budget, `aggregation data is ${size} chars, budget ${budget}`);
+  }
+  const mergeCalls = aggregationCalls.filter((call) => Array.isArray(dataOf(call.prompt).partials));
+  assert.ok(mergeCalls.length >= 2, 'the budget must force more than one merge layer');
+  for (const call of mergeCalls) {
+    assert.ok(call.prompt.includes('partials 是多个局部的子单列表'));
+    assert.ok(call.prompt.includes('同一功能跨章节出现在不同局部时合并为一张子单'));
+    assert.ok(call.prompt.includes('沿用原有 key'));
+    assert.ok(call.prompt.includes('factIds 去重'));
+  }
+  assert.deepEqual(draft.facts.map((fact) => fact.id), ['F1', 'F2', 'F3', 'F4', 'F5']);
+  const mergedInputs = mergeCalls.flatMap((call) => (
+    dataOf(call.prompt).partials.flatMap((partial) => (
+      partial.stories.flatMap((story) => story.factIds)
+    ))
+  ));
+  assert.deepEqual([...new Set(mergedInputs)].sort(), ['F1', 'F2', 'F3', 'F4', 'F5']);
+  for (const fact of draft.facts) {
+    assert.ok(draft.stories.some((story) => story.factIds.includes(fact.id)), fact.id);
+  }
+  assert.equal(validateDraft({ draft, snapshot, actorIds: [] }), draft);
+});
+
+test('a single story larger than the data budget fails as ANALYSIS_LIMIT', async () => {
+  const { createDecomposer } = await loadDecomposer();
+  const snapshot = makeSnapshot({
+    blocks: [
+      { id: 'b_one', heading: '', kind: 'paragraph', text: '甲'.repeat(300) },
+      { id: 'b_two', heading: '', kind: 'paragraph', text: '乙'.repeat(300) },
+    ],
+    resources: [],
+    comments: [],
+  });
+  const oversized = ({ prompt, images }) => {
+    const data = dataOf(prompt);
+    if (Array.isArray(data.units)) return extractFromPrompt({ prompt, images });
+    if (!Array.isArray(data.facts)) {
+      const partials = data.partials ?? [];
+      return mergeStories(
+        partials.flatMap((partial) => partial.stories),
+        partials.flatMap((partial) => partial.issues),
+      );
+    }
+    const factIds = data.facts.map((fact) => fact.id);
+    return {
+      stories: [
+        {
+          key: 'M01',
+          title: '巨型子单',
+          rules: [{ text: '规'.repeat(1900), factIds }],
+          acceptance: [{ text: '验收', factIds }],
+        },
+      ],
+      issues: [],
+    };
+  };
+  const chat = scriptedChat(...Array(20).fill(oversized));
+  await assert.rejects(
+    () => createDecomposer({ chat, limits: { maxChunkChars: 600 } }).analyze(snapshot),
+    { message: 'ANALYSIS_LIMIT' },
+  );
+  assert.equal(chat.calls.filter((call) => call.prompt.includes('事实提取')).length, 1);
+  assert.equal(chat.calls.length, 3, 'the two fact batches run, the oversized merge does not');
+  for (const call of chat.calls.filter((item) => item.prompt.includes('需求聚合'))) {
+    const size = JSON.stringify(dataOf(call.prompt)).length;
+    assert.ok(size <= 600, `captured call carries ${size} data chars`);
+  }
+});
+
+test('an overlong multi-line block splits on a line boundary first', async () => {
+  const { createDecomposer } = await loadDecomposer();
+  const line = '甲'.repeat(100);
+  const text = Array.from({ length: 8 }, () => line).join('\n');
+  const snapshot = makeSnapshot({
+    blocks: [{ id: 'b_multiline', heading: '', kind: 'paragraph', text }],
+    resources: [],
+    comments: [],
+  });
+  const chat = scriptedChat(...Array(20).fill(pipelineReply));
+  const draft = await createDecomposer({ chat, limits: { maxChunkChars: 600 } }).analyze(snapshot);
+
+  const pieces = chat.calls
+    .filter((call) => call.prompt.includes('事实提取'))
+    .flatMap((call) => dataOf(call.prompt).units)
+    .filter((unit) => unit.id === 'b_multiline')
+    .sort((left, right) => left.part - right.part);
+  assert.ok(pieces.length > 1);
+  assert.ok(pieces[0].text.endsWith('\n'), 'the first piece must end on a line boundary');
+  assert.ok(pieces[0].text.length < 500, 'a character split would cut at the raw budget');
+  assert.equal(pieces.map((piece) => piece.text).join(''), text);
+  assert.equal(
+    draft.facts
+      .filter((fact) => fact.sourceIds[0] === 'b_multiline')
+      .map((fact) => fact.text)
+      .join(''),
+    text,
+  );
+  assert.equal(validateDraft({ draft, snapshot, actorIds: [] }), draft);
 });
 
 test('analyze never mutates the snapshot and always reports version 1', async () => {
@@ -1357,6 +1527,7 @@ test('revise bumps the version, keeps decisions and preserves untouched approval
   const resolved = revised.issues.find((issue) => issue.id === 'Q1');
   assert.ok(resolved);
   assert.deepEqual(resolved.resolvedBy, draft.issues[0].resolvedBy);
+  assert.deepEqual(entrance.issueIds, ['Q1', 'Q2']);
   const raised = revised.issues.find((issue) => issue.question === '新增疑问？');
   assert.equal(raised.id, 'Q2');
   assert.equal(raised.resolvedBy, null);
@@ -1625,6 +1796,302 @@ test('revise cannot exceed the model call budget', async () => {
     { message: 'ANALYSIS_LIMIT' },
   );
   assert.equal(chat.calls.length, 1);
+});
+
+test('revise counts the instruction and previous draft against the data budget', async () => {
+  const { createDecomposer } = await loadDecomposer();
+  const snapshot = makeDecomposeSnapshot();
+  const padded = makeRevisionDraft();
+  for (const story of padded.stories) {
+    story.rules = [{ text: '规'.repeat(1900), factIds: [...story.factIds] }];
+  }
+  const hugeChat = scriptedChat();
+  await assert.rejects(
+    () => createDecomposer({ chat: hugeChat, limits: { maxChunkChars: 600 } }).revise({
+      snapshot,
+      draft: padded,
+      instruction: '调整措辞。',
+    }),
+    { message: 'ANALYSIS_LIMIT' },
+  );
+  assert.equal(hugeChat.calls.length, 0, 'no over-budget revise call may be made');
+
+  const tight = {
+    version: 2,
+    facts: [{ id: 'F1', kind: 'source', text: '甲'.repeat(300), sourceIds: ['b_m01'] }],
+    stories: [
+      {
+        key: 'M01',
+        title: '入口',
+        rules: [{ text: '规'.repeat(300), factIds: ['F1'] }],
+        acceptance: [{ text: '验收', factIds: ['F1'] }],
+        sourceIds: ['b_m01'],
+        factIds: ['F1'],
+        dependencies: [],
+        issueIds: [],
+        owner: null,
+        disposition: 'proposed',
+      },
+    ],
+    issues: [],
+    exclusions: [],
+    decisions: [],
+    resourceDecisions: [],
+  };
+  const tightChat = scriptedChat();
+  await assert.rejects(
+    () => createDecomposer({ chat: tightChat, limits: { maxChunkChars: 600 } }).revise({
+      snapshot,
+      draft: tight,
+      instruction: '调整措辞。',
+    }),
+    { message: 'ANALYSIS_LIMIT' },
+  );
+  assert.equal(tightChat.calls.length, 0, 'context plus the smallest fact must fit');
+});
+
+test('revise accepts a reply that relies on the preserved exclusion', async () => {
+  const { createDecomposer } = await loadDecomposer();
+  const snapshot = makeDecomposeSnapshot();
+  const draft = {
+    version: 2,
+    facts: [
+      { id: 'F1', kind: 'source', text: '入口规则原文', sourceIds: ['b_m01'] },
+      { id: 'F2', kind: 'source', text: '周期规则原文', sourceIds: ['b_m02'] },
+      { id: 'F3', kind: 'source', text: '奖励规则原文', sourceIds: ['b_m03'] },
+    ],
+    stories: [
+      {
+        key: 'M01',
+        title: '大厅入口',
+        rules: [{ text: '入口规则', factIds: ['F1'] }],
+        acceptance: [{ text: '入口验收', factIds: ['F1'] }],
+        sourceIds: ['b_m01'],
+        factIds: ['F1'],
+        dependencies: [],
+        issueIds: [],
+        owner: null,
+        disposition: 'proposed',
+      },
+      {
+        key: 'M02',
+        title: '活动周期',
+        rules: [{ text: '周期规则', factIds: ['F2'] }],
+        acceptance: [{ text: '周期验收', factIds: ['F2'] }],
+        sourceIds: ['b_m02'],
+        factIds: ['F2'],
+        dependencies: [],
+        issueIds: [],
+        owner: null,
+        disposition: 'proposed',
+      },
+    ],
+    issues: [],
+    exclusions: [
+      { factIds: ['F2'], reason: '本期不做', approvedBy: 'ou_reviewer' },
+    ],
+    decisions: [
+      { id: 'd_1', actorId: 'ou_reviewer', text: '排除 F2', sourceIds: [] },
+    ],
+    resourceDecisions: [],
+  };
+  const chat = scriptedChat({
+    stories: [
+      {
+        key: 'M01',
+        title: '大厅入口',
+        rules: [{ text: '入口规则', factIds: ['F1'] }],
+        acceptance: [{ text: '入口验收', factIds: ['F1'] }],
+        dependencies: [],
+      },
+      {
+        key: 'M03',
+        title: '奖励',
+        rules: [{ text: '奖励规则', factIds: ['F3'] }],
+        acceptance: [{ text: '奖励验收', factIds: ['F3'] }],
+        dependencies: [],
+      },
+    ],
+    issues: [],
+  });
+  const revised = await createDecomposer({ chat }).revise({
+    snapshot,
+    draft: deepFreeze(draft),
+    instruction: '删除周期子单，保留排除结论。',
+  });
+
+  assert.deepEqual(revised.facts, draft.facts);
+  assert.deepEqual(revised.exclusions, draft.exclusions);
+  assert.equal(revised.stories.some((story) => story.key === 'M02'), false);
+  assert.ok(revised.stories.every((story) => !story.factIds.includes('F2')));
+  assert.equal(revised.version, 3);
+  assert.equal(validateDraft({ draft: revised, snapshot, actorIds: ['ou_reviewer'] }), revised);
+});
+
+test('the revise prompt carries exclusions and a conditional coverage rule', async () => {
+  const { createDecomposer } = await loadDecomposer();
+  const snapshot = makeDecomposeSnapshot();
+  const draft = makeRevisionDraft();
+  const chat = scriptedChat({
+    stories: [
+      {
+        key: 'M01',
+        title: '大厅入口',
+        rules: [{ text: '入口规则', factIds: ['F1'] }],
+        acceptance: [{ text: '入口验收', factIds: ['F1'] }],
+        dependencies: [],
+      },
+      {
+        key: 'M02',
+        title: '活动周期',
+        rules: [{ text: '周期规则', factIds: ['F2'] }],
+        acceptance: [{ text: '周期验收', factIds: ['F2'] }],
+        dependencies: [],
+      },
+    ],
+    issues: [],
+  });
+  await createDecomposer({ chat }).revise({
+    snapshot,
+    draft,
+    instruction: '删掉示例数值。',
+  });
+
+  const revisePrompt = chat.calls[0].prompt;
+  const data = dataOf(revisePrompt);
+  assert.deepEqual(data.exclusions, [{ factIds: ['F4'], reason: '示例数值，本期不承诺' }]);
+  assert.deepEqual(data.decisions, [{ id: 'd_1', text: 'approve M01/M02', sourceIds: [] }]);
+  assert.ok(revisePrompt.includes('exclusions 中列出的事实已经被批准排除'));
+  assert.ok(revisePrompt.includes('exclusions 之外的事实不得遗漏'));
+  assert.ok(!revisePrompt.includes('每条事实至少被一张子单的规则或验收引用'));
+
+  const analyzeChat = scriptedChat(simpleExtraction(), simpleAggregation());
+  await createDecomposer({ chat: analyzeChat }).analyze(simpleSnapshot());
+  assert.ok(analyzeChat.calls[1].prompt.includes('每条事实至少被一张子单的规则或验收引用'));
+});
+
+test('revise repairs and fails when a non-excluded fact stays uncovered', async () => {
+  const { createDecomposer } = await loadDecomposer();
+  const snapshot = makeDecomposeSnapshot();
+  const draft = {
+    version: 2,
+    facts: [
+      { id: 'F1', kind: 'source', text: '入口规则原文', sourceIds: ['b_m01'] },
+      { id: 'F2', kind: 'source', text: '周期规则原文', sourceIds: ['b_m02'] },
+    ],
+    stories: [
+      {
+        key: 'M01',
+        title: '大厅入口',
+        rules: [{ text: '入口规则', factIds: ['F1'] }],
+        acceptance: [{ text: '入口验收', factIds: ['F1'] }],
+        sourceIds: ['b_m01'],
+        factIds: ['F1'],
+        dependencies: [],
+        issueIds: [],
+        owner: null,
+        disposition: 'proposed',
+      },
+    ],
+    issues: [],
+    exclusions: [],
+    decisions: [],
+    resourceDecisions: [],
+  };
+  const bad = {
+    stories: [
+      {
+        key: 'M01',
+        title: '大厅入口',
+        rules: [{ text: '入口规则', factIds: ['F1'] }],
+        acceptance: [{ text: '入口验收', factIds: ['F1'] }],
+        dependencies: [],
+      },
+    ],
+    issues: [],
+  };
+  const chat = scriptedChat(bad, bad);
+  await assert.rejects(
+    () => createDecomposer({ chat }).revise({
+      snapshot,
+      draft,
+      instruction: '保持规则不变。',
+    }),
+    (error) => {
+      assert.equal(error.message, 'ANALYSIS_INVALID');
+      assert.equal(error.cause, 'UNCOVERED_FACT');
+      return true;
+    },
+  );
+  assert.equal(chat.calls.length, 2);
+  assert.ok(chat.calls[1].prompt.includes('错误码 UNCOVERED_FACT'));
+});
+
+test('revise keeps an omitted story whose disposition is excluded', async () => {
+  const { createDecomposer } = await loadDecomposer();
+  const snapshot = makeDecomposeSnapshot();
+  const draft = {
+    version: 2,
+    facts: [{ id: 'F1', kind: 'source', text: '入口规则原文', sourceIds: ['b_m01'] }],
+    stories: [
+      {
+        key: 'M01',
+        title: '示例子单',
+        rules: [{ text: '示例规则', factIds: ['F1'] }],
+        acceptance: [{ text: '示例验收', factIds: ['F1'] }],
+        sourceIds: ['b_m01'],
+        factIds: ['F1'],
+        dependencies: [],
+        issueIds: [],
+        owner: null,
+        disposition: 'excluded',
+      },
+    ],
+    issues: [],
+    exclusions: [
+      { factIds: ['F1'], reason: '本期不做', approvedBy: 'ou_reviewer' },
+    ],
+    decisions: [],
+    resourceDecisions: [],
+  };
+  const chat = scriptedChat({ stories: [], issues: [] });
+  const revised = await createDecomposer({ chat }).revise({
+    snapshot,
+    draft: deepFreeze(draft),
+    instruction: '继续排除该子单。',
+  });
+
+  assert.equal(revised.stories.length, 1);
+  assert.equal(revised.stories[0].key, 'M01');
+  assert.equal(revised.stories[0].disposition, 'excluded');
+  assert.equal(revised.version, 3);
+  assert.equal(validateDraft({ draft: revised, snapshot, actorIds: ['ou_reviewer'] }), revised);
+});
+
+test('revise rejects a malformed draft with a coded INVALID_DRAFT', async () => {
+  const { createDecomposer } = await loadDecomposer();
+  const snapshot = makeDecomposeSnapshot();
+  const chat = scriptedChat();
+  const decomposer = createDecomposer({ chat });
+  const valid = makeRevisionDraft();
+  const cases = [
+    undefined,
+    null,
+    {},
+    { ...valid, facts: 'nope' },
+    { ...valid, stories: undefined },
+    { ...valid, version: 0 },
+    { ...valid, facts: [{ id: 'F1', kind: 'bogus', text: 'x', sourceIds: ['b_m01'] }] },
+    { ...valid, decisions: [{ id: 'd_1' }] },
+    { ...valid, exclusions: [{ factIds: ['F1'] }] },
+  ];
+  for (const draft of cases) {
+    await assert.rejects(
+      () => decomposer.revise({ snapshot, draft, instruction: '调整措辞。' }),
+      { message: 'INVALID_DRAFT' },
+    );
+  }
+  assert.equal(chat.calls.length, 0);
 });
 
 test('a snapshot with the wrong shape is rejected by revise too', async () => {

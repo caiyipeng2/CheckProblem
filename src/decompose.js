@@ -27,10 +27,15 @@ const GUARDRAILS = `安全边界：
 const DATA_MARKER = '数据（JSON）：\n';
 const STORY_KEY = /^[A-Za-z][A-Za-z0-9_-]{0,63}$/;
 const FACT_KINDS = new Set(['source', 'comment', 'suggestion']);
+const DRAFT_FACT_KINDS = new Set(['source', 'comment', 'suggestion', 'decision']);
 const PENDING_STATUSES = new Set(['pending', 'explained', 'excluded']);
 const MEDIA_RESOURCE_KINDS = new Set(['image', 'whiteboard']);
 const MEDIA_BLOCK_KINDS = new Set(['image', 'whiteboard']);
 const PRESERVED_DISPOSITIONS = new Set(['approved', 'deferred', 'excluded']);
+// Extraction text is split slightly below the chunk budget so that a fact
+// built from one piece (its text plus its JSON keys, id and sourceIds) still
+// fits the aggregation data budget. Aggregation itself counts serialized units.
+const FACT_BUDGET_MARGIN = 128;
 
 function isPlainObject(value) {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -95,6 +100,78 @@ function assertSnapshot(snapshot) {
     || !Array.isArray(snapshot.comments)
   ) {
     fail('INVALID_SNAPSHOT');
+  }
+}
+
+// Shape check only: a malformed previous draft must fail with a fixed code
+// before any field is dereferenced. Semantic validation happens on the result.
+function assertDraft(draft) {
+  if (!isPlainObject(draft)) fail('INVALID_DRAFT');
+  if (!Number.isInteger(draft.version) || draft.version <= 0) fail('INVALID_DRAFT');
+  for (const field of ['facts', 'stories', 'issues', 'exclusions', 'decisions', 'resourceDecisions']) {
+    if (!Array.isArray(draft[field])) fail('INVALID_DRAFT');
+  }
+  const arraysOfStrings = (value) => (
+    Array.isArray(value) && value.every((item) => typeof item === 'string' && item !== '')
+  );
+  for (const fact of draft.facts) {
+    if (
+      !isPlainObject(fact)
+      || typeof fact.id !== 'string'
+      || fact.id === ''
+      || !DRAFT_FACT_KINDS.has(fact.kind)
+      || typeof fact.text !== 'string'
+      || !Array.isArray(fact.sourceIds)
+      || fact.sourceIds.some((sourceId) => typeof sourceId !== 'string')
+    ) {
+      fail('INVALID_DRAFT');
+    }
+  }
+  for (const story of draft.stories) {
+    if (
+      !isPlainObject(story)
+      || typeof story.key !== 'string'
+      || story.key === ''
+      || typeof story.title !== 'string'
+      || !Array.isArray(story.rules)
+      || !Array.isArray(story.acceptance)
+      || !Array.isArray(story.dependencies)
+      || !Array.isArray(story.sourceIds)
+      || !Array.isArray(story.factIds)
+      || !Array.isArray(story.issueIds)
+    ) {
+      fail('INVALID_DRAFT');
+    }
+  }
+  for (const issue of draft.issues) {
+    if (
+      !isPlainObject(issue)
+      || typeof issue.id !== 'string'
+      || issue.id === ''
+      || !arraysOfStrings(issue.storyKeys)
+    ) {
+      fail('INVALID_DRAFT');
+    }
+  }
+  for (const exclusion of draft.exclusions) {
+    if (
+      !isPlainObject(exclusion)
+      || !arraysOfStrings(exclusion.factIds)
+      || typeof exclusion.reason !== 'string'
+    ) {
+      fail('INVALID_DRAFT');
+    }
+  }
+  for (const decision of draft.decisions) {
+    if (
+      !isPlainObject(decision)
+      || typeof decision.id !== 'string'
+      || decision.id === ''
+      || typeof decision.text !== 'string'
+      || !arraysOfStrings(decision.sourceIds)
+    ) {
+      fail('INVALID_DRAFT');
+    }
   }
 }
 
@@ -291,6 +368,7 @@ function piecesFor(unit, budget) {
 
 function packChunks(units, unboundPending, limits) {
   const chunks = [];
+  const splitBudget = Math.max(1, limits.maxChunkChars - FACT_BUDGET_MARGIN);
   let current = { pieces: [], images: [], chars: 0 };
   const flush = () => {
     if (current.pieces.length === 0) return;
@@ -298,7 +376,7 @@ function packChunks(units, unboundPending, limits) {
     current = { pieces: [], images: [], chars: 0 };
   };
   for (const unit of units) {
-    for (const piece of piecesFor(unit, limits.maxChunkChars)) {
+    for (const piece of piecesFor(unit, splitBudget)) {
       const overChars = current.chars + piece.chars > limits.maxChunkChars;
       const overImages = current.images.length + piece.images.length > limits.maxImagesPerCall;
       if (current.pieces.length > 0 && (overChars || overImages)) flush();
@@ -374,9 +452,27 @@ ${GUARDRAILS}
 ${DATA_MARKER}${JSON.stringify(data)}`;
 }
 
-function aggregationPrompt(data, mode) {
+function aggregationPrompt(data, mode, stage) {
   const reviseRules = mode === 'revise'
-    ? '- 只能依据 instruction 修改规则表述、拆分、依赖和问题；不得新增事实、不得批准、不得修改 owner/disposition/resolvedBy/actorId。\n- 上一版已批准、暂缓或排除的子单即使本次未输出也会被服务端保留。\n'
+    ? [
+      '- 只能依据 instruction 修改规则表述、拆分、依赖和问题；不得新增事实、不得批准、不得修改 owner/disposition/resolvedBy/actorId。',
+      '- 上一版已批准、暂缓或排除的子单即使本次未输出也会被服务端保留。',
+      '- exclusions 中列出的事实已经被批准排除，不得再由任何新的子单覆盖；exclusions 之外的事实不得遗漏，必须被某张子单的规则或验收引用。',
+      '',
+    ].join('\n')
+    : '';
+  // The unconditional coverage rule is analyze-only: exclusions intentionally
+  // leave facts uncovered in revise mode.
+  const coverageRule = mode === 'revise'
+    ? ''
+    : '- 规则与验收必须用给定事实支撑；factIds 只能引用本次输入的事实 id，每条事实至少被一张子单的规则或验收引用。\n';
+  const mergeRules = stage === 'merge'
+    ? [
+      '- 输入 partials 是多个局部的子单列表，不是原始文档事实；请把它们合并为最终子单列表。',
+      '- 同一功能跨章节出现在不同局部时合并为一张子单，沿用原有 key，不得按局部重复建单。',
+      '- 合并时 factIds 去重，规则与验收保留各自的事实证据，不得丢弃任何局部已覆盖的事实。',
+      '',
+    ].join('\n')
     : '';
   return `你是需求拆分流程的第二阶段：需求聚合${mode === 'revise' ? '与自然语言改稿' : ''}。
 
@@ -387,10 +483,8 @@ function aggregationPrompt(data, mode) {
 - 同一功能跨章节合并为一张子单，不按章节重复建单；每张子单是一个可开发、可验收的功能闭环。
 - “待补充/示例/竞品/延期”不升级为确定要求。
 - 评论与正文冲突时生成 blocking:true 的 issue 并指向相关故事。
-- 规则与验收必须用给定事实支撑；factIds 只能引用本次输入的事实 id，每条事实至少被一张子单的规则或验收引用。
-- key 不得重复；依赖只能指向本次输出的子单或上一版保留的子单。
-${reviseRules}
-${GUARDRAILS}
+${coverageRule}- key 不得重复；依赖只能指向本次输出的子单或上一版保留的子单。
+${mergeRules}${reviseRules}${GUARDRAILS}
 
 ${DATA_MARKER}${JSON.stringify(data)}`;
 }
@@ -819,72 +913,79 @@ function primaryGroupOrder(fact, order) {
   return order.has(primary) ? order.get(primary) : Number.MAX_SAFE_INTEGER;
 }
 
-function packFacts(catalog, order, budget) {
-  const groups = new Map();
-  for (const fact of catalog) {
-    const primary = fact.sourceIds[0];
-    if (!groups.has(primary)) groups.set(primary, []);
-    groups.get(primary).push(fact);
-  }
-  const ordered = [...groups.entries()]
-    .map(([primary, facts]) => ({ primary, facts }))
-    .sort((left, right) => (
-      primaryGroupOrder(left.facts[0], order) - primaryGroupOrder(right.facts[0], order)
-    ));
-  const batches = [];
-  let current = [];
-  const flush = () => {
-    if (current.length > 0) {
-      batches.push(current);
-      current = [];
-    }
-  };
-  for (const group of ordered) {
-    if (JSON.stringify([...current, ...group.facts]).length <= budget) {
-      current.push(...group.facts);
-      continue;
-    }
-    flush();
-    if (JSON.stringify(group.facts).length <= budget) {
-      current.push(...group.facts);
-      continue;
-    }
-    for (const fact of group.facts) {
-      if (current.length > 0 && JSON.stringify([...current, fact]).length > budget) flush();
-      current.push(fact);
-    }
-  }
-  flush();
-  return batches.length > 0 ? batches : [[].concat(catalog)];
+// Facts keep snapshot order (grouped by primary source) before they are packed.
+function orderFacts(facts, order) {
+  return [...facts].sort(
+    (left, right) => primaryGroupOrder(left, order) - primaryGroupOrder(right, order),
+  );
 }
 
-function packResults(results, budget) {
-  const groups = [];
-  let current = [];
-  const flush = () => {
-    if (current.length > 0) {
-      groups.push(current);
-      current = [];
-    }
-  };
-  for (const result of results) {
-    if (current.length > 0 && JSON.stringify([...current, result]).length > budget) flush();
-    current.push(result);
-  }
-  flush();
-  return groups.length > 0 ? groups : [results];
+// A merge-layer unit is a partial result: one story plus the issues that
+// travelled with it (or an issues-only partial). Concrete partials are used as
+// units whole whenever they fit.
+function resultUnits(result) {
+  const stories = Array.isArray(result?.stories) ? result.stories : [];
+  const issues = Array.isArray(result?.issues) ? result.issues : [];
+  if (stories.length === 0) return [{ stories: [], issues }];
+  return stories.map((story, index) => ({
+    stories: [story],
+    issues: index === 0 ? issues : [],
+  }));
 }
 
-function partialFactIds(partials) {
-  const ids = [];
-  for (const partial of partials) {
-    for (const story of partial.stories) {
-      for (const factId of story.factIds) {
-        if (!ids.includes(factId)) ids.push(factId);
-      }
+function storyFactIds(entries) {
+  const ids = new Set();
+  for (const entry of entries) {
+    for (const story of Array.isArray(entry?.stories) ? entry.stories : []) {
+      for (const factId of Array.isArray(story.factIds) ? story.factIds : []) ids.add(factId);
     }
   }
   return ids;
+}
+
+function storyKeys(entries) {
+  const keys = new Set();
+  for (const entry of entries) {
+    for (const story of Array.isArray(entry?.stories) ? entry.stories : []) keys.add(story.key);
+  }
+  return keys;
+}
+
+// Every input fact id must still be cited somewhere at this level, except the
+// facts the server itself keeps covered (approved/deferred/excluded stories and
+// approved exclusions in revise mode). Outputs may not invent fact ids.
+function ensureLevelCoverage(results, inputFactIds, exemptFactIds) {
+  const cited = storyFactIds(results);
+  const missing = [...inputFactIds].filter(
+    (factId) => !cited.has(factId) && !exemptFactIds.has(factId),
+  );
+  if (missing.length > 0) throw analysisInvalid(modelIssue('UNCOVERED_FACT', missing));
+  const foreign = [...cited].filter((factId) => !inputFactIds.has(factId));
+  if (foreign.length > 0) throw analysisInvalid(modelIssue('UNKNOWN_FACT', foreign));
+}
+
+// Facts that stay covered without a new story: approved exclusions, and facts
+// of previous stories the server would re-add when the model omits them.
+function revisionCoverageExempt(draft) {
+  const exempt = new Set();
+  for (const exclusion of draft.exclusions) {
+    for (const factId of exclusion.factIds) exempt.add(factId);
+  }
+  const byKey = new Map(draft.stories.map((story) => [story.key, story]));
+  const exemptStory = (story) => {
+    if (!isPlainObject(story) || !Array.isArray(story.factIds)) return;
+    for (const factId of story.factIds) exempt.add(factId);
+  };
+  for (const story of draft.stories) {
+    if (PRESERVED_DISPOSITIONS.has(story.disposition)) exemptStory(story);
+  }
+  for (const issue of draft.issues) {
+    if (issue?.resolvedBy == null) continue;
+    for (const key of Array.isArray(issue.storyKeys) ? issue.storyKeys : []) {
+      exemptStory(byKey.get(key));
+    }
+  }
+  return exempt;
 }
 
 export function createDecomposer({ chat, limits = {} } = {}) {
@@ -918,10 +1019,10 @@ export function createDecomposer({ chat, limits = {} } = {}) {
     budget,
     snapshot,
     promptData,
+    stage,
     mode,
     availableFactIds,
     allowedKeys,
-    requireCoverage,
     coverageFactIds,
     finalize,
   }) => {
@@ -930,17 +1031,51 @@ export function createDecomposer({ chat, limits = {} } = {}) {
         availableFactIds,
         snapshot,
         allowedKeys,
-        requireCoverage,
+        requireCoverage: true,
         coverageFactIds,
       });
       return finalize ? finalize(candidate) : candidate;
     };
     return runStep({
       budget,
-      prompt: aggregationPrompt(promptData, mode),
+      prompt: aggregationPrompt(promptData, mode, stage),
       images: [],
       parse,
     });
+  };
+
+  // Every model call carries a data payload no larger than maxChunkChars:
+  // serialized fact/story units plus the revise context. Units that cannot fit
+  // even alone are unreducible, so the whole analysis fails as ANALYSIS_LIMIT.
+  const fitsBudget = (field, entries, context) => (
+    JSON.stringify({ [field]: entries, ...context }).length <= settings.maxChunkChars
+  );
+
+  const packLayer = (entries, field, context) => {
+    const groups = [];
+    let current = [];
+    for (const entry of entries) {
+      if (current.length > 0 && !fitsBudget(field, [...current, entry], context)) {
+        groups.push(current);
+        current = [];
+      }
+      current.push(entry);
+    }
+    if (current.length > 0) groups.push(current);
+    return groups.length > 0 ? groups : [[]];
+  };
+
+  const mergeLayerGroups = (results, context) => {
+    const whole = packLayer(results, 'partials', context);
+    const wholeFits = results.every((result) => fitsBudget('partials', [result], context));
+    if (wholeFits && whole.some((group) => group.length > 1)) return whole;
+    // Some partial is too large to travel whole, or no two whole partials fit:
+    // split partials into per-story units and pack those instead.
+    const units = results.flatMap(resultUnits);
+    for (const unit of units) {
+      if (!fitsBudget('partials', [unit], context)) fail('ANALYSIS_LIMIT');
+    }
+    return packLayer(units, 'partials', context);
   };
 
   const aggregate = async ({
@@ -949,53 +1084,70 @@ export function createDecomposer({ chat, limits = {} } = {}) {
     facts,
     context,
     mode,
-    requireCoverage,
     allowedKeys,
+    coverageExempt,
     finalize,
   }) => {
-    const catalog = facts.map(cloneFact);
     const order = snapshotIndex(snapshot).order;
-    const singleBatch = JSON.stringify(catalog).length <= settings.maxChunkChars;
-    const batches = singleBatch ? [catalog] : packFacts(catalog, order, settings.maxChunkChars);
+    const factUnits = orderFacts(facts.map(cloneFact), order);
+    for (const fact of factUnits) {
+      if (!fitsBudget('facts', [fact], context)) fail('ANALYSIS_LIMIT');
+    }
+    const factGroups = packLayer(factUnits, 'facts', context);
     let results = [];
-    for (const batch of batches) {
-      const availableFactIds = new Set(batch.map((fact) => fact.id));
+    for (const group of factGroups) {
+      const availableFactIds = new Set(group.map((fact) => fact.id));
       results.push(await aggregationCall({
         budget,
         snapshot,
-        promptData: { facts: batch, ...context },
+        promptData: { facts: group, ...context },
+        stage: 'facts',
         mode,
         availableFactIds,
         allowedKeys,
-        requireCoverage,
-        coverageFactIds: batch.map((fact) => fact.id),
-        finalize: batches.length === 1 ? finalize : undefined,
+        coverageFactIds: [...availableFactIds].filter(
+          (factId) => !coverageExempt.has(factId),
+        ),
+        finalize: factGroups.length === 1 ? finalize : undefined,
       }));
     }
+    const allFactIds = new Set(factUnits.map((fact) => fact.id));
+    ensureLevelCoverage(results, allFactIds, coverageExempt);
+
+    const seen = new Set();
     while (results.length > 1) {
-      let groups = packResults(results, settings.maxChunkChars);
-      // Partial results can each be close to the budget; if no two fit, merging
-      // them one by one would never reduce the layer count. One over-budget
-      // merge call is preferable to dropping facts or looping until the budget
-      // is exhausted.
-      if (groups.length === results.length) groups = [results];
+      const signature = JSON.stringify(results);
+      if (seen.has(signature)) fail('ANALYSIS_LIMIT');
+      seen.add(signature);
+      const groups = mergeLayerGroups(results, context);
+      // A layer that can only pass single units through cannot reduce the
+      // result set, so the input is not reducible within the data budget.
+      if (groups.every((group) => group.length === 1)) fail('ANALYSIS_LIMIT');
+      const layerFactIds = storyFactIds(results);
+      const layerAllowedKeys = new Set([...allowedKeys, ...storyKeys(results)]);
       const next = [];
       for (const group of groups) {
-        const coverageFactIds = partialFactIds(group);
-        const availableFactIds = new Set(coverageFactIds);
+        if (group.length === 1) {
+          next.push(group[0]);
+          continue;
+        }
+        const availableFactIds = storyFactIds(group);
         next.push(await aggregationCall({
           budget,
           snapshot,
           promptData: { partials: group, ...context },
+          stage: 'merge',
           mode,
           availableFactIds,
-          allowedKeys,
-          requireCoverage,
-          coverageFactIds,
+          allowedKeys: layerAllowedKeys,
+          coverageFactIds: [...availableFactIds].filter(
+            (factId) => !coverageExempt.has(factId),
+          ),
           finalize: groups.length === 1 ? finalize : undefined,
         }));
       }
       results = next;
+      ensureLevelCoverage(results, layerFactIds, coverageExempt);
     }
     return results[0];
   };
@@ -1025,8 +1177,8 @@ export function createDecomposer({ chat, limits = {} } = {}) {
       facts,
       context: {},
       mode: 'analyze',
-      requireCoverage: true,
       allowedKeys: new Set(),
+      coverageExempt: new Set(),
       finalize: finalizeWith((candidateValue) => assembleAnalysis({
         facts,
         candidate: candidateValue,
@@ -1045,28 +1197,38 @@ export function createDecomposer({ chat, limits = {} } = {}) {
       fail('INVALID_INSTRUCTION');
     }
     assertSnapshot(snapshot);
+    assertDraft(draft);
     const budget = { used: 0, max: settings.maxModelCalls };
-    const previousKeys = new Set(
-      (Array.isArray(draft?.stories) ? draft.stories : []).map((story) => story.key),
-    );
-    const previousStories = (Array.isArray(draft?.stories) ? draft.stories : []).map((story) => ({
-      key: story.key,
-      title: story.title,
-      rules: story.rules,
-      acceptance: story.acceptance,
-      dependencies: story.dependencies,
-      factIds: story.factIds,
-      sourceIds: story.sourceIds,
-      disposition: story.disposition,
-    }));
+    const context = {
+      instruction,
+      previousStories: draft.stories.map((story) => ({
+        key: story.key,
+        title: story.title,
+        rules: story.rules,
+        acceptance: story.acceptance,
+        dependencies: story.dependencies,
+        factIds: story.factIds,
+        sourceIds: story.sourceIds,
+        disposition: story.disposition,
+      })),
+      exclusions: draft.exclusions.map((exclusion) => ({
+        factIds: [...exclusion.factIds],
+        reason: exclusion.reason,
+      })),
+      decisions: draft.decisions.map((decision) => ({
+        id: decision.id,
+        text: decision.text,
+        sourceIds: [...decision.sourceIds],
+      })),
+    };
     return aggregate({
       budget,
       snapshot,
       facts: draft.facts,
-      context: { instruction, previousStories },
+      context,
       mode: 'revise',
-      requireCoverage: false,
-      allowedKeys: previousKeys,
+      allowedKeys: new Set(draft.stories.map((story) => story.key)),
+      coverageExempt: revisionCoverageExempt(draft),
       finalize: finalizeWith((candidate) => assembleRevision({ draft, candidate, snapshot })),
     });
   };

@@ -471,14 +471,18 @@ function aggregationPrompt(data, mode, stage) {
       '- 输入 partials 是多个局部的子单列表，不是原始文档事实；请把它们合并为最终子单列表。',
       '- 同一功能跨章节出现在不同局部时合并为一张子单，沿用原有 key，不得按局部重复建单。',
       '- 合并时 factIds 去重，规则与验收保留各自的事实证据，不得丢弃任何局部已覆盖的事实。',
+      '- 输入 partials 中每个 issue 的 id 都必须出现：合并子单时可更新 storyKeys，但不得遗漏或改写已有 id；新问题省略 id，由服务端编号；不得编造其他 id。',
       '',
     ].join('\n')
     : '';
+  const issueSchema = stage === 'merge'
+    ? '{"stories":[{"key":"稳定标识","title":"标题","rules":[{"text":"规则","factIds":["F1"]}],"acceptance":[{"text":"验收条件","factIds":["F1"]}],"dependencies":["其他子单 key"],"sourceIds":["可选：块/资源/评论 id"]}],"issues":[{"id":"输入问题 id（新问题省略 id）","question":"待确认问题","storyKeys":["子单 key"],"blocking":true}]}'
+    : '{"stories":[{"key":"稳定标识","title":"标题","rules":[{"text":"规则","factIds":["F1"]}],"acceptance":[{"text":"验收条件","factIds":["F1"]}],"dependencies":["其他子单 key"],"sourceIds":["可选：块/资源/评论 id"]}],"issues":[{"question":"待确认问题","storyKeys":["子单 key"],"blocking":true}]}';
   return `你是需求拆分流程的第二阶段：需求聚合${mode === 'revise' ? '与自然语言改稿' : ''}。
 
 把输入事实聚合为可开发、可验收的需求子单，并列出待确认问题。
 输出 schema：
-{"stories":[{"key":"稳定标识","title":"标题","rules":[{"text":"规则","factIds":["F1"]}],"acceptance":[{"text":"验收条件","factIds":["F1"]}],"dependencies":["其他子单 key"],"sourceIds":["可选：块/资源/评论 id"]}],"issues":[{"question":"待确认问题","storyKeys":["子单 key"],"blocking":true}]}
+${issueSchema}
 要求：
 - 同一功能跨章节合并为一张子单，不按章节重复建单；每张子单是一个可开发、可验收的功能闭环。
 - “待补充/示例/竞品/延期”不升级为确定要求。
@@ -579,6 +583,8 @@ function parseCandidate(text, {
   allowedKeys = new Set(),
   requireCoverage,
   coverageFactIds,
+  inputIssueIds = null,
+  nextIssueNumber = 1,
 }) {
   const data = parseJson(text);
   if (!isPlainObject(data) || !Array.isArray(data.stories) || !Array.isArray(data.issues)) {
@@ -647,6 +653,12 @@ function parseCandidate(text, {
   });
 
   const issueKeys = new Set([...keys, ...allowedKeys]);
+  // Merge-stage parsing owns the Q namespace: every input issue id must come
+  // back (with its id), unknown/duplicate ids are rejected, and new issues
+  // (no id) are numbered from the server counter. Fact-stage ids are ignored.
+  const requiresIssueIds = inputIssueIds instanceof Set;
+  const issueIds = new Set();
+  let nextNewIssue = Number.isInteger(nextIssueNumber) ? nextIssueNumber : 1;
   const issues = data.issues.map((issue, index) => {
     const path = ['issues', index];
     if (!isPlainObject(issue)) throw modelIssue('INVALID_MODEL_SHAPE', path);
@@ -670,12 +682,35 @@ function parseCandidate(text, {
     if (typeof issue.blocking !== 'boolean') {
       throw modelIssue('INVALID_ISSUE', [...path, 'blocking']);
     }
-    return {
+    let id = null;
+    if (requiresIssueIds && issue.id !== undefined && issue.id !== null) {
+      if (typeof issue.id !== 'string' || !inputIssueIds.has(issue.id)) {
+        throw modelIssue('UNKNOWN_ISSUE', [...path, 'id']);
+      }
+      if (issueIds.has(issue.id)) {
+        throw modelIssue('DUPLICATE_ISSUE', [...path, 'id']);
+      }
+      id = issue.id;
+    } else if (requiresIssueIds) {
+      while (inputIssueIds.has(`Q${nextNewIssue}`) || issueIds.has(`Q${nextNewIssue}`)) {
+        nextNewIssue += 1;
+      }
+      id = `Q${nextNewIssue}`;
+      nextNewIssue += 1;
+    }
+    if (requiresIssueIds) issueIds.add(id);
+    const parsed = {
       question: issue.question,
       storyKeys: dedupe(issue.storyKeys),
       blocking: issue.blocking,
     };
+    if (requiresIssueIds) parsed.id = id;
+    return parsed;
   });
+  if (requiresIssueIds) {
+    const missing = [...inputIssueIds].filter((issueId) => !issueIds.has(issueId));
+    if (missing.length > 0) throw modelIssue('MISSING_ISSUE', missing);
+  }
 
   if (requireCoverage) {
     const missing = coverageFactIds.filter(
@@ -739,8 +774,8 @@ function assembleAnalysis({ facts, candidate, snapshot }) {
     disposition: 'proposed',
   }));
   const byKey = new Map(stories.map((story) => [story.key, story]));
-  const issues = candidate.issues.map((issue, index) => ({
-    id: `Q${index + 1}`,
+  const issues = candidate.issues.map((issue) => ({
+    id: issue.id,
     question: issue.question,
     storyKeys: [...issue.storyKeys],
     blocking: issue.blocking,
@@ -845,8 +880,10 @@ function assembleRevision({ draft, candidate, snapshot }) {
     const match = /^Q(\d+)$/.exec(issue.id);
     if (match) maxQ = Math.max(maxQ, Number(match[1]));
   }
+  // Candidate ids were assigned once by the aggregation pipeline starting
+  // after this draft's highest Q id, so they are kept verbatim.
   const newIssues = candidate.issues.map((issue, index) => ({
-    id: `Q${maxQ + index + 1}`,
+    id: issue.id ?? `Q${maxQ + index + 1}`,
     question: issue.question,
     storyKeys: [...issue.storyKeys],
     blocking: issue.blocking,
@@ -933,6 +970,33 @@ function resultUnits(result) {
   }));
 }
 
+function issueFingerprint(issue) {
+  return JSON.stringify([issue.question, [...issue.storyKeys].sort()]);
+}
+
+// Server-owned Q ids: exact duplicates (same question and story-key set) are
+// folded once, then ids are assigned in encounter order.
+function assignIssueIds(issues, state) {
+  const assigned = [];
+  for (const issue of issues) {
+    const fingerprint = issueFingerprint(issue);
+    if (state.seen.has(fingerprint)) continue;
+    state.seen.add(fingerprint);
+    assigned.push({ ...issue, id: `Q${state.next}` });
+    state.next += 1;
+  }
+  return assigned;
+}
+
+function maxIssueNumber(issues) {
+  let max = 0;
+  for (const issue of issues ?? []) {
+    const match = /^Q(\d+)$/.exec(typeof issue?.id === 'string' ? issue.id : '');
+    if (match) max = Math.max(max, Number(match[1]));
+  }
+  return max;
+}
+
 function storyFactIds(entries) {
   const ids = new Set();
   for (const entry of entries) {
@@ -951,9 +1015,13 @@ function storyKeys(entries) {
   return keys;
 }
 
-// Every input fact id must still be cited somewhere at this level, except the
+// Every input fact id must still be cited somewhere at this level, except
 // facts the server itself keeps covered (approved/deferred/excluded stories and
-// approved exclusions in revise mode). Outputs may not invent fact ids.
+// approved exclusions in revise mode). Defense-in-depth: every parse already
+// validates its own batch coverage and final validateDraft re-checks the
+// assembled draft, so this is not expected to fire at runtime and is not
+// repair-eligible (it bypasses runStep). It keeps future parse changes
+// fail-closed before another model call; outputs may not invent fact ids.
 function ensureLevelCoverage(results, inputFactIds, exemptFactIds) {
   const cited = storyFactIds(results);
   const missing = [...inputFactIds].filter(
@@ -1024,8 +1092,13 @@ export function createDecomposer({ chat, limits = {} } = {}) {
     availableFactIds,
     allowedKeys,
     coverageFactIds,
+    inputIssueIds,
+    nextIssueNumber,
     finalize,
   }) => {
+    // Hard invariant for every emitted analysis call, including the empty-fact
+    // revise payload that no per-entry check would otherwise inspect.
+    if (JSON.stringify(promptData).length > settings.maxChunkChars) fail('ANALYSIS_LIMIT');
     const parse = (text) => {
       const candidate = parseCandidate(text, {
         availableFactIds,
@@ -1033,6 +1106,8 @@ export function createDecomposer({ chat, limits = {} } = {}) {
         allowedKeys,
         requireCoverage: true,
         coverageFactIds,
+        inputIssueIds,
+        nextIssueNumber,
       });
       return finalize ? finalize(candidate) : candidate;
     };
@@ -1086,6 +1161,7 @@ export function createDecomposer({ chat, limits = {} } = {}) {
     mode,
     allowedKeys,
     coverageExempt,
+    issueStart = 1,
     finalize,
   }) => {
     const order = snapshotIndex(snapshot).order;
@@ -1093,10 +1169,26 @@ export function createDecomposer({ chat, limits = {} } = {}) {
     for (const fact of factUnits) {
       if (!fitsBudget('facts', [fact], context)) fail('ANALYSIS_LIMIT');
     }
+    const issueState = { next: issueStart, seen: new Set() };
     const factGroups = packLayer(factUnits, 'facts', context);
+    const singleFactGroup = factGroups.length === 1;
     let results = [];
     for (const group of factGroups) {
       const availableFactIds = new Set(group.map((fact) => fact.id));
+      const callFinalize = singleFactGroup && finalize
+        ? (candidate) => {
+          // Assign against a local state so a repaired finalize reuses the
+          // same ids instead of skipping numbers.
+          const local = { next: issueState.next, seen: new Set() };
+          const result = finalize({
+            ...candidate,
+            issues: assignIssueIds(candidate.issues, local),
+          });
+          issueState.next = local.next;
+          issueState.seen = local.seen;
+          return result;
+        }
+        : undefined;
       results.push(await aggregationCall({
         budget,
         snapshot,
@@ -1108,7 +1200,14 @@ export function createDecomposer({ chat, limits = {} } = {}) {
         coverageFactIds: [...availableFactIds].filter(
           (factId) => !coverageExempt.has(factId),
         ),
-        finalize: factGroups.length === 1 ? finalize : undefined,
+        nextIssueNumber: issueState.next,
+        finalize: callFinalize,
+      }));
+    }
+    if (!singleFactGroup) {
+      results = results.map((result) => ({
+        ...result,
+        issues: assignIssueIds(result.issues, issueState),
       }));
     }
     const allFactIds = new Set(factUnits.map((fact) => fact.id));
@@ -1132,7 +1231,10 @@ export function createDecomposer({ chat, limits = {} } = {}) {
           continue;
         }
         const availableFactIds = storyFactIds(group);
-        next.push(await aggregationCall({
+        const groupIssueIds = new Set(group.flatMap((result) => (
+          Array.isArray(result.issues) ? result.issues.map((issue) => issue.id) : []
+        )));
+        const merged = await aggregationCall({
           budget,
           snapshot,
           promptData: { partials: group, ...context },
@@ -1143,8 +1245,12 @@ export function createDecomposer({ chat, limits = {} } = {}) {
           coverageFactIds: [...availableFactIds].filter(
             (factId) => !coverageExempt.has(factId),
           ),
+          inputIssueIds: groupIssueIds,
+          nextIssueNumber: issueState.next,
           finalize: groups.length === 1 ? finalize : undefined,
-        }));
+        });
+        issueState.next = Math.max(issueState.next, maxIssueNumber(merged.issues) + 1);
+        next.push(merged);
       }
       results = next;
       ensureLevelCoverage(results, layerFactIds, coverageExempt);
@@ -1229,6 +1335,7 @@ export function createDecomposer({ chat, limits = {} } = {}) {
       mode: 'revise',
       allowedKeys: new Set(draft.stories.map((story) => story.key)),
       coverageExempt: revisionCoverageExempt(draft),
+      issueStart: maxIssueNumber(draft.issues) + 1,
       finalize: finalizeWith((candidate) => assembleRevision({ draft, candidate, snapshot })),
     });
   };

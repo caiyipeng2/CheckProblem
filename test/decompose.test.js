@@ -20,6 +20,12 @@ function dataOf(prompt) {
   return JSON.parse(prompt.slice(index + DATA_MARKER.length));
 }
 
+// Repair prompts append instructions after the JSON data, so scripted chat
+// handlers that branch on the data must strip that suffix first.
+function replyData(prompt) {
+  return dataOf(prompt.split('\n\n上一条回复不符合')[0]);
+}
+
 // Replies are taken in call order. An object is serialized as JSON, a string is
 // returned verbatim (so tests can send broken or fenced output), and a function
 // receives the call and may build a reply from the prompt data.
@@ -157,6 +163,36 @@ function pipelineReply({ prompt, images }) {
   return Array.isArray(data.units)
     ? extractFromPrompt({ prompt, images })
     : aggregateFromPrompt({ prompt });
+}
+
+function conflictedStories(facts) {
+  const factIds = facts.map((fact) => fact.id);
+  return {
+    stories: [
+      {
+        key: 'M01',
+        title: '功能',
+        rules: [{ text: '规则', factIds }],
+        acceptance: [{ text: '验收', factIds }],
+      },
+    ],
+    issues: [{ question: '奖励是否自动发放？', storyKeys: ['M01'], blocking: true }],
+  };
+}
+
+// Four blocks of ~328 chars each: one fact per extraction chunk and one fact
+// per aggregation batch at a 600-char budget, then two merge layers.
+function multiLevelIssueSnapshot() {
+  return makeSnapshot({
+    blocks: Array.from({ length: 4 }, (_, index) => ({
+      id: `b_issue_${index + 1}`,
+      heading: '',
+      kind: 'paragraph',
+      text: `[M01] 规则${index + 1}：${'说明'.repeat(160)}`,
+    })),
+    resources: [],
+    comments: [],
+  });
 }
 
 function simpleSnapshot(overrides = {}) {
@@ -1003,6 +1039,20 @@ test('small budgets force multi-level merging without losing any fact text', asy
     assert.equal(draft.stories.filter((story) => story.factIds.includes(fact.id)).length, 1);
   }
   assert.ok(chat.calls.length >= 7);
+  // Four partials do not fit one 600-char payload, so this is two merge
+  // layers: two first-layer merges ([2, 2]) and one final merge.
+  const mergeCalls = chat.calls.filter((call) => (
+    call.prompt.includes('需求聚合') && Array.isArray(dataOf(call.prompt).partials)
+  ));
+  assert.equal(mergeCalls.length, 3);
+  const firstLayer = mergeCalls.slice(0, 2).map((call) => dataOf(call.prompt));
+  assert.ok(firstLayer.every((data) => (
+    data.partials.every((partial) => partial.stories.every((story) => story.factIds.length === 1))
+  )));
+  const finalLayer = dataOf(mergeCalls[2].prompt);
+  assert.ok(finalLayer.partials.some((partial) => (
+    partial.stories.some((story) => story.factIds.length > 1)
+  )));
   assert.equal(validateDraft({ draft, snapshot, actorIds: [] }), draft);
 });
 
@@ -1369,6 +1419,168 @@ test('no aggregation call exceeds the data budget and every fact id survives eve
     assert.ok(draft.stories.some((story) => story.factIds.includes(fact.id)), fact.id);
   }
   assert.equal(validateDraft({ draft, snapshot, actorIds: [] }), draft);
+});
+
+test('a multi-level merge that drops an input issue is repaired once and then fails', async () => {
+  const { createDecomposer } = await loadDecomposer();
+  const snapshot = multiLevelIssueSnapshot();
+  const mergeLayers = [];
+  const reply = ({ prompt }) => {
+    const data = replyData(prompt);
+    if (Array.isArray(data.units)) return extractFromPrompt({ prompt });
+    if (Array.isArray(data.facts)) return conflictedStories(data.facts);
+    const partials = data.partials ?? [];
+    const stories = partials.flatMap((partial) => partial.stories);
+    const issues = partials.flatMap((partial) => partial.issues ?? []);
+    // A story that already carries several facts has been through a merge, so
+    // this call belongs to the second merge layer.
+    const laterLayer = stories.some((story) => story.factIds.length > 1);
+    mergeLayers.push(laterLayer);
+    return mergeStories(stories, laterLayer ? [] : issues);
+  };
+  const chat = scriptedChat(...Array(30).fill(reply));
+  await assert.rejects(
+    () => createDecomposer({ chat, limits: { maxChunkChars: 600 } }).analyze(snapshot),
+    (error) => {
+      assert.equal(error.message, 'ANALYSIS_INVALID');
+      assert.equal(error.cause, 'MISSING_ISSUE');
+      return true;
+    },
+  );
+  assert.deepEqual(mergeLayers, [false, false, true, true]);
+  const repair = chat.calls[chat.calls.length - 1];
+  assert.ok(repair.prompt.includes('错误码 MISSING_ISSUE'));
+});
+
+test('a multi-level merge preserves issue ids, story links and next numbering', async () => {
+  const { createDecomposer } = await loadDecomposer();
+  const snapshot = multiLevelIssueSnapshot();
+  const mergeLayers = [];
+  const reply = ({ prompt }) => {
+    const data = replyData(prompt);
+    if (Array.isArray(data.units)) return extractFromPrompt({ prompt });
+    if (Array.isArray(data.facts)) return conflictedStories(data.facts);
+    const partials = data.partials ?? [];
+    const stories = partials.flatMap((partial) => partial.stories);
+    const issues = partials.flatMap((partial) => partial.issues ?? []);
+    const laterLayer = stories.some((story) => story.factIds.length > 1);
+    mergeLayers.push(laterLayer);
+    const merged = mergeStories(
+      stories,
+      issues.map((issue) => ({
+        ...issue,
+        actorId: 'ou_evil',
+        resolvedBy: { actorId: 'ou_evil', text: 'x', at: 'now' },
+      })),
+    );
+    if (!laterLayer && issues.length > 0) {
+      merged.issues.push({
+        question: '合并阶段的新问题？',
+        storyKeys: ['M01'],
+        blocking: false,
+        actorId: 'ou_evil',
+      });
+    }
+    return merged;
+  };
+  const chat = scriptedChat(...Array(30).fill(reply));
+  const draft = await createDecomposer({ chat, limits: { maxChunkChars: 600 } }).analyze(snapshot);
+
+  assert.deepEqual(mergeLayers, [false, false, true]);
+  const mergeCalls = chat.calls.filter((call) => (
+    call.prompt.includes('需求聚合') && Array.isArray(dataOf(call.prompt).partials)
+  ));
+  assert.equal(mergeCalls.length, 3);
+  const firstMerge = dataOf(mergeCalls[0].prompt);
+  assert.deepEqual(
+    firstMerge.partials.flatMap((partial) => partial.issues).map((issue) => issue.id),
+    ['Q1'],
+  );
+  assert.ok(mergeCalls[0].prompt.includes('每个 issue 的 id 都必须出现'));
+  assert.ok(mergeCalls[0].prompt.includes('新问题省略 id'));
+  assert.deepEqual(draft.facts.map((fact) => fact.id), ['F1', 'F2', 'F3', 'F4']);
+  assert.deepEqual(draft.issues.map((issue) => issue.id), ['Q1', 'Q2']);
+  assert.ok(draft.issues.every((issue) => issue.resolvedBy === null));
+  assert.ok(draft.issues.every((issue) => issue.actorId === undefined));
+  const story = draft.stories.find((candidate) => candidate.key === 'M01');
+  assert.deepEqual(story.issueIds, ['Q1', 'Q2']);
+  assert.ok(draft.issues.every((issue) => /^Q\d+$/.test(issue.id)));
+  assert.ok(draft.facts.every((fact) => /^F\d+$/.test(fact.id)));
+  const factIds = new Set(draft.facts.map((fact) => fact.id));
+  assert.ok(draft.issues.every((issue) => !factIds.has(issue.id)));
+  assert.equal(validateDraft({ draft, snapshot, actorIds: [] }), draft);
+});
+
+test('server issue ids never collide with the fact namespace', async () => {
+  const { createDecomposer } = await loadDecomposer();
+  const snapshot = simpleSnapshot();
+  const chat = scriptedChat(
+    simpleExtraction(),
+    simpleAggregation({
+      issues: [
+        {
+          id: 'F1',
+          question: '命名空间问题？',
+          storyKeys: ['M01'],
+          blocking: true,
+          actorId: 'ou_evil',
+          resolvedBy: { actorId: 'ou_evil', text: 'x', at: 'now' },
+        },
+      ],
+    }),
+  );
+  const draft = await createDecomposer({ chat }).analyze(snapshot);
+
+  assert.deepEqual(draft.issues.map((issue) => issue.id), ['Q1']);
+  assert.equal(draft.issues[0].resolvedBy, null);
+  assert.equal(draft.issues[0].actorId, undefined);
+  assert.ok(draft.facts.every((fact) => /^F\d+$/.test(fact.id)));
+  assert.ok(draft.issues.every((issue) => /^Q\d+$/.test(issue.id)));
+  const factIds = new Set(draft.facts.map((fact) => fact.id));
+  assert.ok(!factIds.has('Q1'));
+  assert.ok(draft.issues.every((issue) => !factIds.has(issue.id)));
+});
+
+test('a merge call may not invent issue ids', async () => {
+  const { createDecomposer } = await loadDecomposer();
+  const snapshot = makeSnapshot({
+    blocks: [
+      { id: 'b_one', heading: '', kind: 'paragraph', text: `[M01] 甲：${'甲'.repeat(300)}` },
+      { id: 'b_two', heading: '', kind: 'paragraph', text: `[M01] 乙：${'乙'.repeat(300)}` },
+    ],
+    resources: [],
+    comments: [],
+  });
+  const reply = ({ prompt }) => {
+    const data = replyData(prompt);
+    if (Array.isArray(data.units)) return extractFromPrompt({ prompt });
+    if (Array.isArray(data.facts)) return conflictedStories(data.facts);
+    const partials = data.partials ?? [];
+    return mergeStories(
+      partials.flatMap((partial) => partial.stories),
+      partials.flatMap((partial) => partial.issues ?? []).map((issue) => ({ ...issue, id: 'Q99' })),
+    );
+  };
+  const chat = scriptedChat(...Array(20).fill(reply));
+  await assert.rejects(
+    () => createDecomposer({ chat, limits: { maxChunkChars: 600 } }).analyze(snapshot),
+    (error) => {
+      assert.equal(error.message, 'ANALYSIS_INVALID');
+      assert.equal(error.cause, 'UNKNOWN_ISSUE');
+      return true;
+    },
+  );
+  const mergeCalls = chat.calls.filter((call) => (
+    call.prompt.includes('需求聚合') && Array.isArray(replyData(call.prompt).partials)
+  ));
+  assert.equal(mergeCalls.length, 2);
+  assert.deepEqual(
+    replyData(mergeCalls[0].prompt).partials
+      .flatMap((partial) => partial.issues ?? [])
+      .map((issue) => issue.id),
+    ['Q1'],
+  );
+  assert.ok(chat.calls[chat.calls.length - 1].prompt.includes('错误码 UNKNOWN_ISSUE'));
 });
 
 test('a single story larger than the data budget fails as ANALYSIS_LIMIT', async () => {
@@ -1796,6 +2008,57 @@ test('revise cannot exceed the model call budget', async () => {
     { message: 'ANALYSIS_LIMIT' },
   );
   assert.equal(chat.calls.length, 1);
+});
+
+test('an empty-fact revise that fits the data budget still emits a draft', async () => {
+  const { createDecomposer } = await loadDecomposer();
+  const snapshot = simpleSnapshot();
+  const draft = {
+    version: 2,
+    facts: [],
+    stories: [],
+    issues: [],
+    exclusions: [],
+    decisions: [],
+    resourceDecisions: [],
+  };
+  const chat = scriptedChat({ stories: [], issues: [] });
+  const revised = await createDecomposer({ chat, limits: { maxChunkChars: 300 } }).revise({
+    snapshot,
+    draft,
+    instruction: '保持为空。',
+  });
+
+  assert.equal(revised.version, 3);
+  assert.deepEqual(revised.facts, []);
+  assert.deepEqual(revised.stories, []);
+  assert.equal(chat.calls.length, 1);
+  assert.ok(JSON.stringify(dataOf(chat.calls[0].prompt)).length <= 300);
+  assert.equal(validateDraft({ draft: revised, snapshot, actorIds: [] }), revised);
+});
+
+test('an over-budget empty-fact revise fails before any model call', async () => {
+  const { createDecomposer } = await loadDecomposer();
+  const snapshot = simpleSnapshot();
+  const draft = {
+    version: 2,
+    facts: [],
+    stories: [],
+    issues: [],
+    exclusions: [],
+    decisions: [],
+    resourceDecisions: [],
+  };
+  const chat = scriptedChat({ stories: [], issues: [] });
+  await assert.rejects(
+    () => createDecomposer({ chat, limits: { maxChunkChars: 300 } }).revise({
+      snapshot,
+      draft,
+      instruction: '调整措辞。'.repeat(100),
+    }),
+    { message: 'ANALYSIS_LIMIT' },
+  );
+  assert.equal(chat.calls.length, 0, 'the empty fact payload still counts against the budget');
 });
 
 test('revise counts the instruction and previous draft against the data budget', async () => {

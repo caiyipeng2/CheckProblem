@@ -267,6 +267,27 @@ async function endToEndHarness(overrides = {}) {
     notices,
     request: () => store.list()[0],
 
+    // A new process: same ledger file, same transport, fresh modules.
+    restart() {
+      const store = openRequirementStore(config.requirements.paths.stateFile);
+      const submitter = createRequirementSubmitter({
+        store,
+        tapd: createTapdStories({
+          tokenFile: 'C:/secrets/tapd.token',
+          request: fakeTapdTransport(remote, overrides.transport ?? {}),
+          readFile: () => TOKEN,
+        }),
+        documents: createPlanningDocumentReader({
+          run: replayCli([]),
+          hosts: config.requirements.documentHosts,
+          assetsDir: config.requirements.paths.assetsDir,
+        }),
+        targets: requirementTargets(config),
+        clock: { now: clockNow },
+      });
+      return { store, submitter };
+    },
+
     async sendPlanningDocument({ actor = INITIATOR, text = `拆分需求 ${DOC_URL}` } = {}) {
       const accepted = await flow.handleMessage({
         message_id: nextMessageId(),
@@ -418,40 +439,49 @@ test('the same document sent twice does not start a second analysis or a second 
   assert.equal(h.remote.created.length, 0);
 });
 
-test('a restart reopens the same ledger and does not create the batch twice', async () => {
+test('a completed batch is not written again after a restart', async () => {
   const h = await endToEndHarness();
   await h.sendPlanningDocument();
-  await h.review({ selectedKeys: ["M01"], parentId: PARENT_ID });
-  const createdBefore = h.remote.created.length;
-  assert.equal(createdBefore, 1);
+  await h.review({ selectedKeys: ['M01'], parentId: PARENT_ID });
+  assert.equal(h.remote.created.length, 1);
 
-  // A new process would open the very same file and run its recovery pass.
-  const reopened = openRequirementStore(h.config.requirements.paths.stateFile);
-  assert.equal(reopened.list().length, 1, 'the ledger survived the restart');
-  const recovered = reopened.list()[0];
-  assert.equal(recovered.status, 'partially_completed');
-  assert.equal(recovered.submissions.length, 1);
-
-  const resume = createRequirementSubmitter({
-    store: reopened,
-    tapd: createTapdStories({
-      tokenFile: 'C:/secrets/tapd.token',
-      request: fakeTapdTransport(h.remote),
-      readFile: () => TOKEN,
-    }),
-    documents: createPlanningDocumentReader({
-      run: replayCli([]),
-      hosts: h.config.requirements.documentHosts,
-      assetsDir: h.config.requirements.paths.assetsDir,
-    }),
-    targets: requirementTargets(h.config),
-    clock: { now: clockNow },
+  const reopened = h.restart();
+  assert.equal(reopened.store.list().length, 1, 'the ledger survived the restart');
+  const recovered = reopened.store.list()[0];
+  const result = await reopened.submitter.resume({
+    requestId: recovered.id,
+    batchId: recovered.submissions[0].batch.id,
+    actorId: REVIEWER,
   });
-  const batchId = recovered.submissions[0].batch.id;
-  await resume.resume({ requestId: recovered.id, batchId, actorId: REVIEWER });
-  const resumed = reopened.list()[0];
-  assert.equal(resumed.blockedReason, '', `resume must not pause on the source check: ${resumed.blockedReason}`);
-  assert.equal(h.remote.created.length, createdBefore, 'recovery never re-creates a landed story');
+  assert.equal(result?.status, 'completed', 'the resumed submitter finds nothing left to write');
+  assert.equal(h.remote.created.length, 1, 'a landed story is never written twice');
+});
+
+test('a restart finishes the pending items of a paused batch exactly once', async () => {
+  // The parent does not cite this document yet, so the first submit pauses with
+  // the child still pending — the state a crash between freeze and write leaves.
+  const h = await endToEndHarness({ parentDescription: '<p>勋章挑战功能需求（未写来源）</p>' });
+  await h.sendPlanningDocument();
+  await h.review({ selectedKeys: ['M01'] });
+
+  const paused = h.request();
+  assert.equal(paused.blockedReason, 'PARENT_MISMATCH');
+  assert.equal(h.remote.created.length, 0);
+  const pending = paused.submissions[0].items.filter((item) => item.status === 'pending');
+  assert.ok(pending.some((item) => item.key === 'M01'), 'the child is still pending, not lost');
+
+  // The operator fixes the parent in TAPD; the next process may finish the batch.
+  h.remote.stories[0].description = '<p>来源文档：https://example.feishu.cn/docx/syntheticDocToken</p>';
+  const reopened = h.restart();
+  const result = await reopened.submitter.resume({
+    requestId: paused.id,
+    batchId: paused.submissions[0].batch.id,
+    actorId: REVIEWER,
+  });
+
+  assert.equal(result?.status, 'completed');
+  assert.deepEqual(h.remote.created.map((story) => story.name), ['大厅入口与倒计时'], 'the pending child is written once');
+  assert.equal(h.remote.created.filter((story) => story.parent_id === '0').length, 0, 'the bound parent is reused');
 });
 
 test('model output is escaped, never injected into the ticket markup', async () => {

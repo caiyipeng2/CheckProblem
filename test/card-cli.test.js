@@ -1,12 +1,21 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, delimiter } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 
 const bin = fileURLToPath(new URL('../bin/checkproblem.js', import.meta.url));
+
+test('the entry point derives the submitter target from the shared builder', () => {
+  // bin cannot be imported without starting the service, so the guard reads it:
+  // a workspace-only target passes every unit test and fails on the first real
+  // submit, which is exactly the regression this line exists for.
+  const source = readFileSync(bin, 'utf8');
+  assert.match(source, /targets:\s*requirementTargets\(config\)/);
+  assert.doesNotMatch(source, /targets\[projectId\] = \{ workspaceId \}/);
+});
 
 test('live cards refuse --once rather than posting buttons without a listener', (t) => {
   const root = mkdtempSync(join(tmpdir(), 'checkproblem-card-cli-'));

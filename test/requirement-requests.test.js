@@ -914,6 +914,27 @@ test('a start creates the request, reads, analyses and renders a review card', a
   assert.doesNotMatch(cardText, /apiKeyFile|secrets\/model\.key|stateFile/, 'no credential path reaches the card');
 });
 
+test('the confirm page shows the configured target, not an empty one', async () => {
+  const config = makeConfig();
+  config.requirements.projects.weapon.parentOwner = OWNER_A;
+  config.requirements.projects.weapon.parentIterationId = ITERATION;
+  const h = await reviewHarness({ seed: false, config });
+  await h.send(`拆分需求 ${DOC_URL}`, { actor: INITIATOR, messageId: 'om_start' });
+  const started = h.store.list()[0];
+  // The freshly published card carries the id the reply returned, not the
+  // seeded harness constant, so the press has to come from that card.
+  await h.press('confirm', { requestId: started.id, messageId: started.cardMessageIds.at(-1) });
+  const text = JSON.stringify(h.lark.sent.updates.at(-1)?.card);
+
+  assert.match(text, new RegExp(`workspace ${WORKSPACE}`), 'the mapped workspace is shown');
+  assert.match(text, /父单类型：type-parent/);
+  assert.match(text, /子单类型：type-child/);
+  assert.match(text, /模板：tpl-1/);
+  assert.match(text, new RegExp(`父单负责人：${OWNER_A}`), 'the parent owner comes from config');
+  assert.match(text, new RegExp(`父单迭代：${ITERATION}`), 'the parent iteration is independent of the child default');
+  assert.ok(!text.includes('未配置'), 'no configured target field renders as unset');
+});
+
 test('only an allowed sender may start a request', async () => {
   const h = await reviewHarness({ seed: false });
   const accepted = await h.send(`拆分需求 ${DOC_URL}`, { actor: OUTSIDER, messageId: 'om_start' });

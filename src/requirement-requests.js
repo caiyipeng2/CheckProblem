@@ -334,9 +334,11 @@ export function createRequirementRequests({
     const stored = isPlainObject(request.target) ? request.target : {};
     const storedParent = isPlainObject(stored.parent) ? stored.parent : {};
     const bound = firstString(request.parentStoryId, storedParent.storyId);
+    // The parent half is independent of the child defaults (spec: 父单独立):
+    // a stored override wins, otherwise the project's own parent values apply.
     const parent = {
-      owner: firstString(storedParent.owner),
-      iterationId: firstString(storedParent.iterationId),
+      owner: firstString(storedParent.owner, entry.parentOwner),
+      iterationId: firstString(storedParent.iterationId, entry.parentIterationId),
     };
     if (bound !== '') {
       parent.mode = 'bind';
@@ -389,7 +391,13 @@ export function createRequirementRequests({
   function render(request, viewerId, view) {
     if (!isPlainObject(request?.draft)) return null;
     try {
-      return buildRequirementCard({ request, view: view ?? viewOf(request), viewerId });
+      // The card must show the target a submission would freeze. `request.target`
+      // only carries reviewer overrides; the authoritative target is derived
+      // from config on every render, so the confirm page never reads as
+      // "not configured" while the submitter has real values.
+      const target = targetFor(request);
+      const viewRequest = target ? { ...request, target } : request;
+      return buildRequirementCard({ request: viewRequest, view: view ?? viewOf(request), viewerId });
     } catch (error) {
       logLine('warn', `requirement card render failed: ${safeCode(error)}`);
       return null;

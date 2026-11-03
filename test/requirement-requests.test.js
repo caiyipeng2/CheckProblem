@@ -329,6 +329,7 @@ function fakeTapd(remote) {
     async createStory({ workspaceId, fields }) {
       const key = fields.parent_id ? remote.titleToKey.get(fields.name) : 'parent';
       if (!key) throw coded('INVALID_ARGUMENT', 'fake tapd: unknown story name');
+      if (remote.behavior[key] === 'rejected') throw coded('REJECTED', 'fake tapd: rejected');
       remote.created.push(key);
       const id = land(workspaceId, fields);
       remote.calls.push({ key, fields, id });
@@ -792,6 +793,22 @@ test('cancel closes the request and disables every write afterwards', async () =
   const after = h.store.get('r1');
   assert.equal(after.draft.version, 1);
   assert.equal(after.submissions.length, 0);
+});
+
+test('cancel is refused once a batch has written a parent or a child', async () => {
+  const h = await reviewHarness();
+  await h.press('defer', { key: 'M02' });
+  await h.prime({});
+  await h.press('submit');
+  const before = h.store.get('r1');
+  assert.equal(before.status, 'partially_completed');
+  assert.ok(before.parentStoryId, 'the parent was written and recorded');
+
+  await h.press('cancel');
+  const after = h.store.get('r1');
+  assert.equal(after.status, 'partially_completed', 'the request stays open');
+  assert.equal(after.submissions.length, 1, 'no state is discarded');
+  assert.match(h.texts(), /已写入|不能取消/, 'the reviewer is told why the cancel did nothing');
 });
 
 test('approve and defer are recorded against the acting reviewer and bump one version', async () => {
@@ -1274,6 +1291,26 @@ test('submitting a subset then the rest does not build a second parent', async (
   assert.equal(request.submissions[1].batch.parent.mode, 'bind');
   assert.equal(request.submissions[1].batch.parent.storyId, parentId);
   assert.equal(h.remote.created.filter((key) => key === 'parent').length, 1, 'the second batch reuses the parent');
+  assert.equal(request.status, 'completed');
+});
+
+test('a rejected item is retried in a new batch and created items are never rebuilt', async () => {
+  const h = await reviewHarness({ behavior: { M01: 'rejected' } });
+  await h.press('submit');
+  let request = h.store.get('r1');
+  assert.equal(request.status, 'needs_review');
+  assert.equal(request.submissions.length, 1);
+  assert.deepEqual(h.remote.created, ['parent'], 'a rejection proves nothing was written');
+  assert.equal(request.submissions[0].items.find((item) => item.key === 'M01').status, 'rejected');
+
+  // TAPD accepts the corrected payload on the retry: the gate must let the
+  // reviewer submit again, and the new batch may only carry uncreated keys.
+  delete h.remote.behavior.M01;
+  await h.press('submit');
+  request = h.store.get('r1');
+  assert.equal(request.submissions.length, 2);
+  assert.deepEqual(request.submissions[1].batch.stories.map((item) => item.key), ['M01', 'M02']);
+  assert.deepEqual(h.remote.created.slice().sort(), ['M01', 'M02', 'parent'], 'each story lands once');
   assert.equal(request.status, 'completed');
 });
 

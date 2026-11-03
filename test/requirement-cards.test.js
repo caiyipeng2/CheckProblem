@@ -13,6 +13,7 @@ import {
   CARD_MAX_BYTES,
   LIST_PAGE_SIZE,
   PAGE_BODY_BYTES,
+  cancelGate,
   confirmSeenOk,
   missingDetails,
   reviewState,
@@ -770,6 +771,17 @@ test('the exported submit gate opens exactly when the confirm card enables 提�
     { key: 'M01', marker: 'req-M01-0000000000000000', status: 'unknown', storyId: null },
   ] })];
 
+  // A TAPD rejection proves nothing was created, so the reviewer must be able
+  // to fix the payload and submit the failed items again as a new batch. The
+  // created parent is reused and created children stay out of the selection.
+  const rejected = ready([storyAt(0), storyAt(1)]);
+  rejected.status = 'needs_review';
+  rejected.submissions = [submission({ status: 'paused', items: [
+    { key: 'parent', marker: 'req-parent-0000000000000000', status: 'created', storyId: '1159180547001000000' },
+    { key: 'M01', marker: 'req-M01-0000000000000000', status: 'created', storyId: '1159180547001000001' },
+    { key: 'M02', marker: 'req-M02-0000000000000000', status: 'rejected', storyId: null },
+  ] })];
+
   const cases = [
     ['a fully read batch', ready([storyAt(0), storyAt(1)]), REVIEWER, true],
     ['one story whose detail is unread', unreadDetail, REVIEWER, false],
@@ -779,6 +791,7 @@ test('the exported submit gate opens exactly when the confirm card enables 提�
     ['nothing approved yet', nothingApproved, REVIEWER, false],
     ['a cancelled request', cancelled, REVIEWER, false],
     ['an unknown submission result', unknown, REVIEWER, false],
+    ['a rejected batch whose uncreated items may be retried', rejected, REVIEWER, true],
     ['a viewer without review rights', ready([storyAt(0)]), 'ou_stranger', false],
   ];
 
@@ -796,6 +809,40 @@ test('the exported submit gate opens exactly when the confirm card enables 提�
       assert.match(body(card), /提交前还需/, `${name}: the card says what is still missing`);
     }
   }
+});
+
+test('a request that already wrote to TAPD cannot be cancelled', () => {
+  // 取消只适用于尚未写入的工作: the parent or a child is already remote, so a
+  // cancelled request would make the next document message look like a fresh
+  // start and rebuild what exists.
+  const written = withSeen(targetRequest({ draft: draftWith([storyAt(0), storyAt(1)]) }), ['M01', 'M02']);
+  written.status = 'partially_completed';
+  written.submissions = [submission({ items: [
+    { key: 'parent', marker: 'req-parent-0000000000000000', status: 'created', storyId: '1159180547001000000' },
+    { key: 'M01', marker: 'req-M01-0000000000000000', status: 'created', storyId: '1159180547001000001' },
+    { key: 'M02', marker: 'req-M02-0000000000000000', status: 'pending', storyId: null },
+  ] })];
+
+  assert.match(cancelGate(reviewState(written, REVIEWER)), /已写入/);
+  const card = buildRequirementCard({ request: written, view: view('list'), viewerId: REVIEWER });
+  assert.equal(buttonFor(card, 'cancel').disabled, true, 'the button is cold on every page');
+  assert.match(body(card), /不能取消/, 'the card says why');
+
+  const unknown = withSeen(targetRequest({ draft: draftWith([storyAt(0)]) }), ['M01']);
+  unknown.status = 'needs_review';
+  unknown.submissions = [submission({ items: [
+    { key: 'M01', marker: 'req-M01-0000000000000000', status: 'unknown', storyId: null },
+  ] })];
+  assert.match(cancelGate(reviewState(unknown, REVIEWER)), /未知/,
+    'an unknown result may have landed, so it blocks cancel too');
+
+  const untouched = withSeen(targetRequest({ draft: draftWith([storyAt(0)]) }), ['M01']);
+  untouched.status = 'needs_review';
+  untouched.submissions = [submission({ items: [
+    { key: 'M01', marker: 'req-M01-0000000000000000', status: 'rejected', storyId: null },
+  ] })];
+  assert.equal(cancelGate(reviewState(untouched, REVIEWER)), '',
+    'a definite rejection proves nothing was written, so cancel stays legal');
 });
 
 test('the exported eligibility helpers are the ones the card renders from', () => {
@@ -905,16 +952,17 @@ test('an unknown submission result disables 再提交 and offers 核对', () => 
   assert.equal(buttonFor(card, 'resume').disabled, true, 'resume waits for the reconcile');
 });
 
-test('a paused batch without unknown items offers 继续 instead of a blind resend', () => {
+test('a paused batch without unknown items may retry the rest as a new batch', () => {
   const request = withSeen(targetRequest({ draft: draftWith([storyAt(0)]) }), ['M01']);
   request.submissions = [submission({ status: 'paused', items: [
     { key: 'parent', marker: 'req-parent-0000000000000000', status: 'created', storyId: '1159180547001000000' },
     { key: 'M01', marker: 'req-M01-0000000000000000', status: 'blocked', storyId: null },
   ] })];
   const card = buildRequirementCard({ request, view: view('confirm'), viewerId: REVIEWER });
-  assert.equal(buttonFor(card, 'submit').disabled, true);
+  assert.equal(buttonFor(card, 'submit').disabled, false, 'a paused batch without unknowns may go out again');
   assert.equal(buttonFor(card, 'resume').disabled, false);
   assert.match(body(card), /被依赖阻塞/, 'the item status is shown');
+  assert.match(body(card), /上一批次未完成/, 'the retry is called out as a new batch');
 });
 
 test('a running batch shows sending progress and refuses a second submit', () => {

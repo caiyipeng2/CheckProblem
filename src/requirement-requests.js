@@ -45,6 +45,7 @@ import { extractPlainText } from './trigger.js';
 import {
   LIST_PAGE_SIZE,
   buildRequirementCard,
+  cancelGate,
   confirmSeenOk,
   missingDetails,
   reviewState,
@@ -129,6 +130,7 @@ const REFUSALS = {
   NOT_REVIEWER: NOTICE.notReviewer,
   NOT_WRITABLE: '当前状态不可写入，操作无效。',
   BATCH_IN_FLIGHT: '已有批次正在提交中，本需求暂不可编辑。',
+  CANCEL_AFTER_WRITE: '已有内容写入 TAPD，不能取消；请继续完成剩余项或核对台账。',
   SOURCE_CHANGED: `来源文档已变化，本次提交无效（SOURCE_CHANGED）。`,
   SOURCE_RECHECK_FAILED: '来源文档复核失败，本次提交无效（SOURCE_RECHECK_FAILED）。',
   NOTHING_TO_SUBMIT: '没有可提交的子单：请先批准子单并查看完整详情与确认页。',
@@ -1009,14 +1011,22 @@ export function createRequirementRequests({
   }
 
   async function cancelRequest(value) {
-    await write(value.requestId, (request) => {
-      const gate = gateRequest(request, value);
-      if (!gate.ok) throw coded(gate.code);
-      if (gate.state.ledger.running) throw coded('BATCH_IN_FLIGHT');
-      request.status = STATUS.CANCELLED;
-      request.pendingInput = null;
-      request.blockedReason = 'CANCELLED';
-    });
+    let failure = null;
+    try {
+      await write(value.requestId, (request) => {
+        const gate = gateRequest(request, value);
+        if (!gate.ok) throw coded(gate.code);
+        if (cancelGate(gate.state) !== '') throw coded('CANCEL_AFTER_WRITE');
+        request.status = STATUS.CANCELLED;
+        request.pendingInput = null;
+        request.blockedReason = 'CANCELLED';
+      });
+    } catch (error) {
+      failure = safeCode(error);
+    }
+    const fresh = store.get(value.requestId);
+    if (!isPlainObject(fresh)) return;
+    if (failure) await notice(fresh, refusal(failure));
     await refresh(value.requestId, value.actorId);
   }
 

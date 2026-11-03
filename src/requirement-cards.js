@@ -452,10 +452,12 @@ const listPageCount = (state) => Math.max(1, Math.ceil(state.stories.length / LI
 export function submitGate(state, pageCount) {
   const reasons = [...writeGate(state)];
   if (state.ledger.running) reasons.push('已有批次正在写入，等结果落盘后再操作');
-  else if (state.ledger.needsAttention) {
-    reasons.push(state.ledger.unknownItems.length > 0
-      ? '存在结果未知项：查不到不等于可以自动重试，请先核对'
-      : '上一批次未完成：先核对或继续，不要重复提交');
+  // A definite rejection proves nothing was written, and every created key is
+  // already excluded from the next selection, so the remaining and rejected
+  // items may go out again as a new batch. Only an unknown result (and the
+  // in-flight batch above) keeps the write cold: it may already exist.
+  else if (state.ledger.unknownItems.length > 0) {
+    reasons.push('存在结果未知项：查不到不等于可以自动重试，请先核对');
   }
   if (state.batchLimit) reasons.push(`单批最多 ${MAX_BATCH_STORIES} 张子单，需分批提交（仍关联同一父单）`);
   if (state.selected.length === 0 && !state.batchLimit) reasons.push('没有可提交子单');
@@ -463,6 +465,17 @@ export function submitGate(state, pageCount) {
   if (missing.length > 0) reasons.push(`尚未查看完整详情：${missing.join('、')}`);
   if (!confirmSeenOk(state, pageCount)) reasons.push('确认页尚未查看');
   return reasons;
+}
+
+// 取消只适用于尚未写入的工作. Once a parent or child is remote (or may be),
+// closing the request would let the next document message open a fresh request
+// and rebuild what already exists, so the cancel stays off. A definite
+// rejection proves nothing was written and does not block it.
+export function cancelGate(state) {
+  if (state.ledger.created.size > 0) return '已写入 TAPD 的需求不能取消，请继续完成剩余项';
+  if (state.ledger.unknownItems.length > 0) return '存在结果未知项：先核对 TAPD，不能取消';
+  if (state.ledger.sendingItems.length > 0 || state.ledger.running) return '有批次正在写入，暂不能取消';
+  return '';
 }
 
 // The 确认页 part is only exact on the confirm card, which owns the real segment
@@ -492,6 +505,8 @@ function commonLines(request, state, mode) {
   out.push(`草稿 v${state.version} · ${MODE_LABELS[mode]} · ${state.statusLabel}`);
   const blocked = blockedReasonLine(request);
   if (blocked) out.push(blocked);
+  const noCancel = cancelGate(state);
+  if (noCancel !== '') out.push(`不能取消：${noCancel}`);
   if (!state.allowed) out.push('无审核权限：可查看全部内容，所有写入按钮不会生效。');
   if (state.voided) out.push(`草稿版本已更新到 v${state.version}，此前的查看范围作废，需要重新查看。`);
   return out;
@@ -569,6 +584,7 @@ function storyDecisionButtons(request, state, story, page) {
 
 function listButtons(request, state, page, pageCount) {
   const disabled = gated(state);
+  const cancelReason = cancelGate(state);
   const rows = [];
   if (page > 0) rows.push(makeButton('list_prev', '上一页', callbackFor(request, 'list_prev', '', page - 1), false));
   if (page < pageCount - 1) rows.push(makeButton('list_next', '下一页', callbackFor(request, 'list_next', '', page + 1), false));
@@ -576,7 +592,7 @@ function listButtons(request, state, page, pageCount) {
   rows.push(makeButton('select_target', '选择目标项目', callbackFor(request, 'select_target', '', page), disabled));
   rows.push(makeButton('select_iteration', '设置子单迭代', callbackFor(request, 'select_iteration', '', page), disabled));
   rows.push(makeButton('bind_parent', '关联已有父单', callbackFor(request, 'bind_parent', '', page), disabled));
-  rows.push(makeButton('cancel', '取消拆分', callbackFor(request, 'cancel', '', 0), disabled, 'danger'));
+  rows.push(makeButton('cancel', '取消拆分', callbackFor(request, 'cancel', '', 0), disabled || cancelReason !== '', 'danger'));
   return rows;
 }
 
@@ -829,6 +845,7 @@ function confirmAtoms(request, state, sections, reasons) {
 
 function confirmButtons(request, state, page, pageCount, reasons) {
   const disabled = gated(state);
+  const cancelReason = cancelGate(state);
   const submitDisabled = reasons.length > 0;
   const hasUnknown = state.ledger.unknownItems.length > 0;
   const buttons = [];
@@ -842,7 +859,7 @@ function confirmButtons(request, state, page, pageCount, reasons) {
     submitDisabled,
     'primary_filled',
   ));
-  buttons.push(makeButton('cancel', '取消拆分', callbackFor(request, 'cancel', '', 0), disabled, 'danger'));
+  buttons.push(makeButton('cancel', '取消拆分', callbackFor(request, 'cancel', '', 0), disabled || cancelReason !== '', 'danger'));
   // Reconcile is read-only against TAPD, so it stays usable for any reader;
   // resume does post stories and is gated like every other write.
   buttons.push(makeButton('reconcile', '核对 TAPD', callbackFor(request, 'reconcile', '', 0), false));

@@ -5,6 +5,9 @@ export const CONFIRM_PROMPT = '收到。请任意群成员在 10 分钟内回复
 export const TIMEOUT_NOTICE = '查询请求已超时，如需分析请重新发起。';
 export const CANCELLED_NOTICE = '查询已取消。';
 export const BUSY_NOTICE = '已有查询待确认，请先确认或取消。';
+// Another heavy operation (bug query or 需求拆分) owns the work slot. The press
+// is deliberately not queued, so the operator may retry once it finishes.
+export const WORK_BUSY_NOTICE = '正在处理其他重操作，本次查询未开始，请稍后重试。';
 
 // Single source of the provenance footer, so formatResult and clipForReply
 // cannot drift apart on its wording. `provenance` is what was analysed, e.g.

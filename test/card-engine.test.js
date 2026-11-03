@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { createEngine } from '../src/index.js';
 import { initialState, loadState, saveState } from '../src/state.js';
 import { buildQueryCard } from '../src/cards.js';
+import { createWorkSlot } from '../src/work-slot.js';
 
 const message = (id, text, t = 10, sender = 'ou_member') => ({
   message_id: id, create_time: String(t), msg_type: 'text', sender: { id: sender },
@@ -391,6 +392,51 @@ test('running and terminal cards cannot be edited or started again', async () =>
   await tick;
   await h.engine.tick();
   assert.equal(h.calls.filter(([op]) => op === 'sync').length, 1);
+  assert.equal(h.state.job, null);
+});
+
+test('a start refused by the busy slot keeps the card awaiting and says why', async () => {
+  const slot = createWorkSlot();
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  const held = slot.tryStart('requirements:r_busy', () => gate);
+  assert.equal(held.accepted, true);
+
+  const h = harness({ engine: { slot } });
+  await h.engine.tick();
+  h.engine.enqueueCardAction(h.event('start'));
+  await h.engine.tick();
+
+  assert.equal(h.calls.length, 0, 'a refused start must never run a hidden query');
+  assert.equal(h.state.job.status, 'awaiting', 'the refusal leaves the card retryable');
+  assert.equal(h.state.job.revision, 0, 'the refusal changes nothing the card renders');
+  assert.match(h.replies.at(-1).text, /正在处理其他重操作/);
+
+  release();
+  await held.done;
+  assert.equal(slot.isBusy(), false);
+  h.engine.enqueueCardAction(h.event('start'));
+  await h.engine.tick();
+  assert.deepEqual(h.calls.map(([action]) => action), ['sync', 'search', 'analysis']);
+});
+
+test('a card query holds the shared slot for its whole run and then releases it', async () => {
+  const slot = createWorkSlot();
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  const h = harness({ engine: {
+    slot,
+    runAnalysis: async () => { await gate; return { text: '查询结果' }; },
+  } });
+  await h.engine.tick();
+  h.engine.enqueueCardAction(h.event('start'));
+  const tick = h.engine.tick();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(slot.isBusy(), true, 'the analysis occupies the one heavy-work slot');
+  assert.equal(slot.tryStart('requirements:r_other', async () => {}).accepted, false);
+  release();
+  await tick;
+  assert.equal(slot.isBusy(), false, 'the slot is released when the query settles');
   assert.equal(h.state.job, null);
 });
 

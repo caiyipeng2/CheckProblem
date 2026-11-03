@@ -2,10 +2,15 @@ import { randomUUID } from 'node:crypto';
 import { buildBranchOptions, buildQueryCard } from './cards.js';
 import { matchProject } from './projects.js';
 import { buildBugPayload } from './tapd.js';
+import { WORK_BUSY_NOTICE } from './reply.js';
+import { createWorkSlot } from './work-slot.js';
 
 const REPORT_LIMIT = 20;
 
-export function createCardRequests({ config, state, lark, listBranches, clock, saveState, log, runJob, tapd = null }) {
+export function createCardRequests({ config, state, lark, listBranches, clock, saveState, log, runJob, tapd = null, slot = null }) {
+  // The one slot shared with 需求拆分: a card start reserves it before the job
+  // leaves `awaiting`, so two heavy operations can never overlap.
+  const workSlot = slot ?? createWorkSlot({ log });
   const queue = [];
   let draining = null;
   // A press is worth acting on the moment it arrives, so an accepted event
@@ -60,6 +65,16 @@ export function createCardRequests({ config, state, lark, listBranches, clock, s
     if (state.job?.requestId === job.requestId) state.job = null;
     saveState(state);
     await retryTerminalUpdates();
+  }
+
+  // A refusal is advisory: a recalled message or a flaky API must not change the
+  // job, which stays awaiting for the next press.
+  async function busyNotice(job) {
+    try {
+      await lark.reply(job.triggerMessageId, WORK_BUSY_NOTICE);
+    } catch (err) {
+      log?.error?.(`cannot deliver busy notice to ${job.triggerMessageId}: ${err?.message ?? err}`);
+    }
   }
 
   async function loadBranches(job) {
@@ -260,7 +275,21 @@ export function createCardRequests({ config, state, lark, listBranches, clock, s
       } else if (event.action === 'start') {
         const project = config.projects.find((p) => p.id === job.projectId);
         if (!project || !job.branch || !job.branches.includes(job.branch)) continue;
-        await runJob({ sender: { id: event.operatorId } }, { ...project, branch: job.branch });
+        // Reserve first, change the job second. A refused reservation must leave
+        // the card exactly as it was: still awaiting, same revision, no hidden
+        // query — otherwise a slot held by 需求拆分 would strand the card on
+        // 查询中 with nothing behind it.
+        const reservation = workSlot.tryStart(`bug:${job.requestId}`, () => runJob(
+          { sender: { id: event.operatorId } },
+          { ...project, branch: job.branch },
+        ));
+        if (!reservation?.accepted) {
+          await busyNotice(job);
+          continue;
+        }
+        job.status = 'running';
+        saveState(state);
+        await reservation.done;
       }
     }
   }

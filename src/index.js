@@ -16,6 +16,7 @@ import { buildPrompt } from './analyze.js';
 import { CONFIRM_PROMPT, TIMEOUT_NOTICE, CANCELLED_NOTICE, BUSY_NOTICE, clipForReply } from './reply.js';
 import { createCardRequests } from './card-requests.js';
 import { clearImages, collectImages, imageDirFor, uniqueRefs } from './images.js';
+import { createWorkSlot } from './work-slot.js';
 
 // Enough for a busy chat plus the context window. The brief's
 // max(20, contextMessages + 5) was replaced by a fixed page: context never
@@ -40,9 +41,12 @@ function contextLine(msg) {
   return `${who}: ${extractPlainText(msg).trim().slice(0, CONTEXT_LINE_CHARS)}`;
 }
 
-export function createEngine({ config, lark, syncRepo, runAnalysis, state, clock, log, saveState, retrieve, listBranches, tapd = null }) {
+export function createEngine({ config, lark, syncRepo, runAnalysis, state, clock, log, saveState, retrieve, listBranches, tapd = null, slot = null }) {
+  // One heavy-work slot for the whole process: 故障排查 and 需求拆分 share it, so
+  // the entry point creates it once and hands the very same object to both.
+  const workSlot = slot ?? createWorkSlot({ log });
   const cards = config.projects ? createCardRequests({
-    config, state, lark, listBranches, clock, saveState, log, runJob, tapd,
+    config, state, lark, listBranches, clock, saveState, log, runJob, tapd, slot: workSlot,
   }) : null;
   const isServiceMessage = (message) => cards
     ? message?.sender?.sender_type === 'app'

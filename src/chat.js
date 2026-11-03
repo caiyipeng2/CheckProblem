@@ -9,6 +9,13 @@ const DEFAULT_TIMEOUT_MS = 120_000;
 const DEFAULT_KEY_ENV = 'DEEPSEEK_API_KEY';
 const LINE_BREAK = /\r?\n/;
 const LABEL_PREFIX = /^key\s*[:：]\s*/i;
+// Node's fetch gives up on a stalled response before our own AbortController
+// fires, and reports only "fetch failed"; keep the real reason visible.
+const TRANSPORT_TIMEOUTS = {
+  UND_ERR_HEADERS_TIMEOUT: '等待响应超时（服务端长时间没有返回）',
+  UND_ERR_BODY_TIMEOUT: '响应读取超时',
+  UND_ERR_CONNECT_TIMEOUT: '连接超时',
+};
 
 // The key comes from an environment variable or, if that is not set, from a
 // file the operator writes themselves — so a secret never has to be pasted into
@@ -105,6 +112,8 @@ export async function askChat({
     return { text: content.trim() };
   } catch (err) {
     if (err?.name === 'AbortError') throw new Error(`${model} 超时（${Math.round(timeoutMs / 1000)} 秒）`);
+    const transportTimeout = TRANSPORT_TIMEOUTS[err?.cause?.code];
+    if (transportTimeout) throw new Error(`${model} ${transportTimeout}`);
     throw err;
   } finally {
     clearTimeout(timer);

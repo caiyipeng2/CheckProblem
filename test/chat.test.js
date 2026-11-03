@@ -86,6 +86,21 @@ test('askChat reports a timeout instead of hanging', async () => {
     /超时（0 秒）/,
   );
 });
+test('askChat names a transport timeout instead of leaking the fetch wrapper', async () => {
+  for (const [code, hint] of [
+    ['UND_ERR_HEADERS_TIMEOUT', /等待响应超时/],
+    ['UND_ERR_BODY_TIMEOUT', /响应读取超时/],
+    ['UND_ERR_CONNECT_TIMEOUT', /连接超时/],
+  ]) {
+    const fetchImpl = async () => {
+      throw new TypeError('fetch failed', { cause: { code } });
+    };
+    await assert.rejects(
+      () => askChat({ prompt: 'p', baseUrl: 'https://x', model: 'deepseek-flash', apiKey: 'k', fetchImpl }),
+      hint,
+    );
+  }
+});
 test('resolveApiKey prefers the environment and falls back to a file', async () => {
   const { resolveApiKey } = await import('../src/chat.js');
   assert.equal(resolveApiKey({ apiKeyEnv: 'K', env: { K: ' from-env ' } }), 'from-env');

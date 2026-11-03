@@ -16,6 +16,7 @@ const TRANSPORT_TIMEOUTS = {
   UND_ERR_BODY_TIMEOUT: '响应读取超时',
   UND_ERR_CONNECT_TIMEOUT: '连接超时',
 };
+const TRANSIENT_STATUS = new Set([502, 503, 504]);
 
 // The key comes from an environment variable or, if that is not set, from a
 // file the operator writes themselves — so a secret never has to be pasted into
@@ -69,6 +70,8 @@ export async function askChat({
   apiKey,
   timeoutMs = DEFAULT_TIMEOUT_MS,
   fetchImpl = globalThis.fetch,
+  retries = 2,
+  retryDelayMs = 2_000,
 }) {
   if (!baseUrl) throw new Error('chat 引擎缺少 baseUrl');
   if (!model) throw new Error('chat 引擎缺少 model');
@@ -82,7 +85,7 @@ export async function askChat({
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
 
-  try {
+  const post = async () => {
     const res = await fetchImpl(url, {
       method: 'POST',
       headers: { 'content-type': 'application/json', authorization: `Bearer ${apiKey}` },
@@ -96,7 +99,11 @@ export async function askChat({
     });
 
     const raw = await res.text();
-    if (!res.ok) throw new Error(`${model} 返回 HTTP ${res.status}: ${raw.trim().slice(-300)}`);
+    if (!res.ok) {
+      const failure = new Error(`${model} 返回 HTTP ${res.status}: ${raw.trim().slice(-300)}`);
+      failure.status = res.status;
+      throw failure;
+    }
 
     let data;
     try {
@@ -110,11 +117,23 @@ export async function askChat({
       throw new Error(`${model} 返回空内容`);
     }
     return { text: content.trim() };
-  } catch (err) {
-    if (err?.name === 'AbortError') throw new Error(`${model} 超时（${Math.round(timeoutMs / 1000)} 秒）`);
-    const transportTimeout = TRANSPORT_TIMEOUTS[err?.cause?.code];
-    if (transportTimeout) throw new Error(`${model} ${transportTimeout}`);
-    throw err;
+  };
+
+  try {
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        return await post();
+      } catch (err) {
+        if (err?.name === 'AbortError') throw new Error(`${model} 超时（${Math.round(timeoutMs / 1000)} 秒）`);
+        const transportTimeout = TRANSPORT_TIMEOUTS[err?.cause?.code];
+        if (transportTimeout) throw new Error(`${model} ${transportTimeout}`);
+        // The gateway answers 502 while its upstream model reconnects; retrying
+        // briefly turns that into a slow answer instead of a dead analysis.
+        const transient = TRANSIENT_STATUS.has(err?.status) || err?.cause !== undefined;
+        if (!transient || attempt >= retries) throw err;
+        await new Promise((resolve) => setTimeout(resolve, retryDelayMs));
+      }
+    }
   } finally {
     clearTimeout(timer);
   }

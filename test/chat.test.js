@@ -92,14 +92,58 @@ test('askChat names a transport timeout instead of leaking the fetch wrapper', a
     ['UND_ERR_BODY_TIMEOUT', /响应读取超时/],
     ['UND_ERR_CONNECT_TIMEOUT', /连接超时/],
   ]) {
+    let calls = 0;
     const fetchImpl = async () => {
+      calls += 1;
       throw new TypeError('fetch failed', { cause: { code } });
     };
     await assert.rejects(
       () => askChat({ prompt: 'p', baseUrl: 'https://x', model: 'deepseek-flash', apiKey: 'k', fetchImpl }),
       hint,
     );
+    assert.equal(calls, 1, `${code} must not be retried`);
   }
+});
+test('askChat retries a transient upstream failure', async () => {
+  let calls = 0;
+  const fetchImpl = async () => {
+    calls += 1;
+    if (calls === 1) return { ok: false, status: 502, text: async () => '{"type":"upstream_error"}' };
+    return reply('可用');
+  };
+  const res = await askChat({
+    prompt: 'p', baseUrl: 'https://x', model: 'deepseek-flash', apiKey: 'k', fetchImpl, retryDelayMs: 0,
+  });
+  assert.equal(res.text, '可用');
+  assert.equal(calls, 2);
+});
+test('askChat stops after the retry budget and keeps the last HTTP error', async () => {
+  let calls = 0;
+  const fetchImpl = async () => {
+    calls += 1;
+    return { ok: false, status: 502, text: async () => 'upstream down' };
+  };
+  await assert.rejects(
+    () => askChat({
+      prompt: 'p', baseUrl: 'https://x', model: 'deepseek-flash', apiKey: 'k', fetchImpl, retryDelayMs: 0,
+    }),
+    /HTTP 502.*upstream down/s,
+  );
+  assert.equal(calls, 3);
+});
+test('askChat does not retry a client error', async () => {
+  let calls = 0;
+  const fetchImpl = async () => {
+    calls += 1;
+    return { ok: false, status: 401, text: async () => 'bad key' };
+  };
+  await assert.rejects(
+    () => askChat({
+      prompt: 'p', baseUrl: 'https://x', model: 'deepseek-flash', apiKey: 'k', fetchImpl, retryDelayMs: 0,
+    }),
+    /HTTP 401/,
+  );
+  assert.equal(calls, 1);
 });
 test('resolveApiKey prefers the environment and falls back to a file', async () => {
   const { resolveApiKey } = await import('../src/chat.js');

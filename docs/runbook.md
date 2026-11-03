@@ -276,8 +276,9 @@ schtasks /Delete /TN "CheckProblem" /F
 | `requirements.reviewers` | 额外审核人；发起人默认也是审核人 |
 | `requirements.documentHosts` | 允许读取的文档域名（裸域名，如 `hellowd.feishu.cn`） |
 | `requirements.modelAttempt` | 指向 `analyze.attempts` 的下标；必须是 `kind:"chat"` 且带 `apiKeyFile`、`apiKeyEnv:""` 的项，凭据只从文件读 |
-| `requirements.projects.<项目id>` | 必须与 `tapd.workspaces` 有同名映射。字段：`parentTypeId`、`childTypeId`、`templateId`、`owners`、`iterationIds`，可选 `parentStoryId` |
+| `requirements.projects.<项目id>` | 必须与 `tapd.workspaces` 有同名映射。字段：`parentTypeId`、`childTypeId`、`templateId`、`owners`、`iterationIds`，可选 `parentStoryId`、`parentOwner`、`parentIterationId` |
 | `requirements.projects.<id>.parentStoryId` | 该文档已有关联父单时填这里。每个请求创建时就带着它，提交前会重新读取核对 workspace、`parent_id=0` 与正文里的文档 id；不一致则以 `PARENT_MISMATCH` 暂停，不会写到别的父单下。不填则提交时新建父单 |
+| `requirements.projects.<id>.parentOwner` / `.parentIterationId` | 可选。新建父单时的负责人与迭代，与子单默认值互相独立；不填则父单不写这两项。绑定已有父单时以绑定单为准 |
 
 `state`/`assets` 路径由 `requirements.paths` 推导（`<root>/state/requirements.json`、`<root>/state/requirement-assets`），不需要手写。
 
@@ -298,8 +299,9 @@ schtasks /Delete /TN "CheckProblem" /F
 1. 草稿生成后机器人发出审核卡，按子单分页展示。
 2. 审核人逐张「查看详情」→「确认页」→ 对每张「批准 / 延期 / 排除」；每次决定都会让之前看到的版本作废，需要重新查看。
 3. 「提交」只把**已批准**的子单放进本批；延期的不建单，排除的不再提示。
-4. 已有父单必须绑定，绝不重复创建；同一批最多 50 张子单（另加 1 张父单，合计 51 项），超过会以 `BATCH_TOO_LARGE` 拒绝。
+4. 已有父单必须绑定，绝不重复创建；同一批最多 50 张子单（另加 1 张父单，合计 51 项），超过时提交前门禁会以 `BATCH_LIMIT` 拒绝（服务端另有 `BATCH_TOO_LARGE` 兜底）。
 5. 只有审核人可以操作；其他人点击不会改变任何状态。
+6. 「取消拆分」只适用于**尚未写入**的需求：台账里已有父单/子单、或有 `unknown` 项时按钮置灰并写明原因。取消后同一文档再发起会重新建立请求，已经写入的内容不会被重建，但审核决定需要重来，所以已写入后请继续完成或核对，不要取消。
 
 ### 未知状态如何核对
 
@@ -308,6 +310,8 @@ TAPD 没有幂等键，网络超时或 5xx 之后无法判断单子是否已建�
 1. 先在 TAPD 里按标题搜一遍，确认是否已存在；
 2. 回到卡片点「核对」（reconcile），让它去读远端并把结果写回台账；
 3. **首版没有「核对确认未创建后自动重试」的路径**：只要台账里还有 `unknown` 项，同一请求的提交会被门禁拒绝，恢复流程也会跳过它。确认远端确实没有之后，需要人工处理台账（或另起一次拆分）。另起请求会重新创建该子单，务必先确认远端不存在，否则就是重复单。
+
+与 `unknown` 不同，TAPD **明确拒绝**（`rejected`）说明这一项没有写入：审核人修好载荷后可以直接「再提交剩余子单」，系统会把未创建（含被拒绝）的项组成新批次，已创建的子单与父单不会重建。批次因依赖阻塞等可重试原因暂停、且台账没有 `unknown` 项时同样允许再提交；只要存在 `unknown`，提交与取消都会被门禁挡住，必须先核对。
 
 进程重启时，`submitting` 状态但批次里没有任何已发项的请求会被释放回 `needs_review`（`BATCH_NOT_STARTED`），可重新提交；其余中断的读取/分析会记为 `READ_INTERRUPTED`/`ANALYZE_INTERRUPTED`，原因会显示在审核卡上。
 

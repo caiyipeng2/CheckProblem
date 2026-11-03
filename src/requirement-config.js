@@ -103,6 +103,12 @@ function projectEntries(raw, projects, tapd) {
     if (parentStoryId !== '' && !/^\d{6,32}$/.test(parentStoryId)) {
       fail(`${where}.parentStoryId`, 'must be a TAPD story id');
     }
+    const parentOwner = entry.parentOwner === undefined
+      ? ''
+      : requiredString(entry.parentOwner, `${where}.parentOwner`);
+    const parentIterationId = entry.parentIterationId === undefined
+      ? ''
+      : requiredString(entry.parentIterationId, `${where}.parentIterationId`);
     entries[projectId] = {
       parentTypeId: requiredString(entry.parentTypeId, `${where}.parentTypeId`),
       childTypeId: requiredString(entry.childTypeId, `${where}.childTypeId`),
@@ -110,6 +116,8 @@ function projectEntries(raw, projects, tapd) {
       owners: stringList(entry.owners, `${where}.owners`, { allowEmpty: false }),
       iterationIds: stringList(entry.iterationIds, `${where}.iterationIds`, { allowEmpty: true }),
       ...(parentStoryId === '' ? {} : { parentStoryId }),
+      ...(parentOwner === '' ? {} : { parentOwner }),
+      ...(parentIterationId === '' ? {} : { parentIterationId }),
     };
   }
   return entries;
@@ -153,14 +161,19 @@ export function requirementTargets({ tapd, requirements } = {}) {
     if (typeof workspaceId !== 'string' || workspaceId === '') {
       throw new Error(`config: requirements.projects.${projectId} has no TAPD workspace id`);
     }
+    const parent = {};
+    if (entry.parentStoryId !== undefined) {
+      parent.mode = 'bind';
+      parent.storyId = entry.parentStoryId;
+    }
+    if (entry.parentOwner !== undefined) parent.owner = entry.parentOwner;
+    if (entry.parentIterationId !== undefined) parent.iterationId = entry.parentIterationId;
     targets[projectId] = {
       workspaceId,
       parentTypeId: entry.parentTypeId,
       childTypeId: entry.childTypeId,
       templateId: entry.templateId,
-      ...(entry.parentStoryId === undefined
-        ? {}
-        : { parent: { mode: 'bind', storyId: entry.parentStoryId } }),
+      ...(Object.keys(parent).length === 0 ? {} : { parent }),
     };
   }
   return targets;

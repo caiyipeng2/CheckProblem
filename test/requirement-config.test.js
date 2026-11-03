@@ -364,3 +364,35 @@ test('the submitter target carries the types and template the payload needs', ()
   assert.equal(withoutParent.weapon.parent, undefined, 'no configured parent, no bind entry');
   assert.equal(withoutParent.weapon.childTypeId, 'child-type');
 });
+
+test('the parent half of the target is independent and optional', () => {
+  const withParent = {
+    ...base(),
+    projects: {
+      weapon: {
+        ...base().projects.weapon,
+        parentOwner: 'parent-owner',
+        parentIterationId: 'parent-iteration',
+      },
+    },
+  };
+  const normalized = normalizeRequirements(withParent, options());
+  assert.equal(normalized.projects.weapon.parentOwner, 'parent-owner');
+  assert.equal(normalized.projects.weapon.parentIterationId, 'parent-iteration');
+
+  const targets = requirementTargets({ tapd, requirements: normalized });
+  assert.deepEqual(targets.weapon.parent, { owner: 'parent-owner', iterationId: 'parent-iteration' },
+    'a created parent gets its own owner and iteration, not the child defaults');
+  assert.equal(targets.weapon.childTypeId, 'child-type', 'the rest of the target is unchanged');
+
+  for (const bad of ['', '   ', 7]) {
+    assert.throws(
+      () => normalizeRequirements(
+        { ...withParent, projects: { weapon: { ...withParent.projects.weapon, parentOwner: bad } } },
+        options(),
+      ),
+      /parentOwner/,
+      String(bad),
+    );
+  }
+});

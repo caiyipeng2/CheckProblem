@@ -97,7 +97,7 @@ const WHITEBOARD_NODES = [
   { id: 'node-2', text: '画板文字' },
   { id: 'node-3', text: '第二段' },
 ];
-const WHITEBOARD_RAW_BYTES = () => Buffer.from(JSON.stringify({ nodes: WHITEBOARD_NODES }), 'utf8');
+const WHITEBOARD_RAW_BYTES = (nodes = WHITEBOARD_NODES) => Buffer.from(JSON.stringify({ nodes }), 'utf8');
 const WORKBOOK_HTML = (cell) => [
   '<html><body><table>',
   '<tr><td>A1</td><td>B1</td></tr>',
@@ -143,6 +143,7 @@ function platformFixture(overrides = {}) {
     workbookCell: control.workbookCell ?? 'B2原始值',
     originalBytes: control.originalBytes ?? DEFAULT_ORIGINAL_BYTES,
     sheetCsv: control.sheetCsv ?? 'A1,B1\nA2,B2',
+    whiteboardNodes: control.whiteboardNodes ?? WHITEBOARD_NODES,
   };
 
   const writeOutput = (output, bytes) => {
@@ -203,7 +204,9 @@ function platformFixture(overrides = {}) {
       if (control.whiteboardResult !== undefined) return control.whiteboardResult;
       const output = argValue(args, '--output');
       const type = argValue(args, '--output-type');
-      const bytes = type === 'preview' ? WHITEBOARD_PREVIEW_BYTES : WHITEBOARD_RAW_BYTES();
+      const bytes = type === 'preview'
+        ? WHITEBOARD_PREVIEW_BYTES
+        : Buffer.from(JSON.stringify({ nodes: state.whiteboardNodes }), 'utf8');
       writeOutput(output, bytes);
       return ok({ saved_path: output, size_bytes: bytes.length });
     }
@@ -259,6 +262,9 @@ function platformFixture(overrides = {}) {
     setCommentPages(pages) {
       state.commentPages = pages;
     },
+    setWhiteboardNodes(nodes) {
+      state.whiteboardNodes = nodes;
+    },
     replaceWorkbookCell(value) {
       state.workbookCell = value;
     },
@@ -270,7 +276,7 @@ function platformFixture(overrides = {}) {
     },
     imageBytes: IMAGE_BYTES,
     whiteboardPreviewBytes: WHITEBOARD_PREVIEW_BYTES,
-    whiteboardRawBytes: WHITEBOARD_RAW_BYTES,
+    whiteboardRawBytes: () => WHITEBOARD_RAW_BYTES(state.whiteboardNodes),
     workbookBytes: () => state.originalBytes,
     workbookHtmlBytes: () => Buffer.from(WORKBOOK_HTML(state.workbookCell), 'utf8'),
     sha256,
@@ -789,10 +795,7 @@ test('production resource readers match the verified argv and hash real bytes', 
     },
     requestDir,
   });
-  assert.equal(whiteboard.fingerprint, fixture.sha256([
-    fixture.whiteboardPreviewBytes,
-    fixture.whiteboardRawBytes(),
-  ]));
+  assert.match(whiteboard.fingerprint, /^[0-9a-f]{64}$/);
   assert.ok(whiteboard.text.includes('画板文字'));
   assert.equal(whiteboard.text.split('画板文字').length - 1, 1);
   assert.ok(whiteboard.text.includes('第二段'));
@@ -867,6 +870,33 @@ test('production resource readers match the verified argv and hash real bytes', 
     '--if-exists', 'overwrite',
     '--as', 'user', '--json',
   ]);
+});
+
+test('a whiteboard exported in a new node order still fingerprints the same', async (t) => {
+  // The whiteboard export lists the same nodes in a different order on every
+  // call. Hashing the raw bytes made an untouched board look changed, so any
+  // revise or submit on a document with a whiteboard died as SOURCE_CHANGED.
+  const fixture = platformFixture();
+  t.after(() => dispose(fixture));
+  const readers = createCliResourceReaders({ run: fixture.run, limits: fixture.limits });
+  const requestDir = mkdtempSync(join(tmpdir(), 'planning-wb-order-'));
+  t.after(() => rmSync(requestDir, { recursive: true, force: true }));
+  const resource = {
+    id: 'wb-1',
+    kind: 'whiteboard',
+    sourceBlockId: 'wb-1',
+    text: '',
+    token: MEDIA.whiteboard,
+  };
+  const first = await readers.whiteboard({ resource, requestDir });
+  fixture.setWhiteboardNodes([...WHITEBOARD_NODES].reverse());
+  const second = await readers.whiteboard({ resource, requestDir });
+  assert.equal(second.fingerprint, first.fingerprint);
+  assert.equal(second.text, first.text);
+
+  fixture.setWhiteboardNodes([{ id: 'node-1', text: '改过的文字' }]);
+  const changed = await readers.whiteboard({ resource, requestDir });
+  assert.notEqual(changed.fingerprint, first.fingerprint);
 });
 
 test('production reader failures use fixed codes and fail closed', async (t) => {

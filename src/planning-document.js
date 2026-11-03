@@ -773,9 +773,20 @@ export function createCliResourceReaders({ run, limits = {} } = {}) {
     } catch {
       fail('READ_FAILED');
     }
+    // The export lists the same nodes in a different order on every call, so
+    // neither the raw bytes nor their order may identify the board: sorting by
+    // node id keeps the fingerprint and the extracted text reproducible, while
+    // the preview is a rendering of these same nodes and adds no coverage.
+    const nodes = Array.isArray(raw?.nodes)
+      ? [...raw.nodes].sort((left, right) => {
+        const a = String(left?.id ?? '');
+        const b = String(right?.id ?? '');
+        return a < b ? -1 : a > b ? 1 : 0;
+      })
+      : [];
     return {
-      text: collectWhiteboardStrings(raw?.nodes),
-      fingerprint: sha256Bytes(Buffer.concat([previewBytes, rawBytes])),
+      text: collectWhiteboardStrings(nodes),
+      fingerprint: sha256Text(canonicalJson({ nodes })),
       sourceIds: sourceIdsFor(resource),
       path: previewFile,
       bytes: previewBytes.length + rawBytes.length,

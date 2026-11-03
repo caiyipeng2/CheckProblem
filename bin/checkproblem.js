@@ -27,6 +27,7 @@ import { createCliResourceReaders, createPlanningDocumentReader } from '../src/p
 import { createDecomposer } from '../src/decompose.js';
 import { createTapdStories } from '../src/tapd-stories.js';
 import { createRequirementSubmitter } from '../src/requirement-submit.js';
+import { requirementTargets } from '../src/requirement-config.js';
 import { createRequirementRequests } from '../src/requirement-requests.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -128,19 +129,13 @@ if (config.requirements && !config.dryRun) {
   // coordinator derives the target from the same two sections (requirements
   // projects + TAPD workspaces). They must stay one source, or every real
   // submission would be refused as SUBMISSION_MISMATCH while tests stay green.
-  const targets = {};
-  for (const projectId of Object.keys(settings.projects)) {
-    const workspaceId = config.tapd?.workspaces?.[projectId]?.workspaceId;
-    if (typeof workspaceId !== 'string' || workspaceId === '') {
-      throw new Error(`config: requirements.projects.${projectId} has no TAPD workspace id`);
-    }
-    targets[projectId] = { workspaceId };
-  }
+  // The map also has to carry the types and the template: the submitter builds
+  // the TAPD payload straight from it.
   const submitter = createRequirementSubmitter({
     store,
     tapd: tapdStories,
     documents,
-    targets,
+    targets: requirementTargets(config),
     clock: { now: () => Date.now() },
   });
   requirements = createRequirementRequests({

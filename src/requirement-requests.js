@@ -1408,6 +1408,14 @@ export function createRequirementRequests({
       await write(request.id, (target) => {
         const gate = gateRequest(target, value);
         if (!gate.ok) throw coded(gate.code);
+        // The parent binding is per project, so a project chosen after the request
+        // was created (the document named no project) must pick it up here —
+        // otherwise the batch would create a duplicate parent for a document that
+        // already has one. An explicit reviewer binding still wins.
+        const configured = firstString(requirements?.projects?.[decision.projectId]?.parentStoryId);
+        if (configured !== '' && !nonEmptyString(target.parentBindOverride?.storyId)) {
+          target.parentStoryId = configured;
+        }
         target.projectId = decision.projectId;
         target.blockedReason = '';
         target.pendingInput = null;

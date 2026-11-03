@@ -17,6 +17,7 @@ import { openRequirementStore } from '../src/requirement-store.js';
 import { createTapdStories } from '../src/tapd-stories.js';
 import { createRequirementSubmitter } from '../src/requirement-submit.js';
 import { createRequirementRequests } from '../src/requirement-requests.js';
+import { requirementTargets } from '../src/requirement-config.js';
 import { createWorkSlot } from '../src/work-slot.js';
 
 const FIXTURE = JSON.parse(readFileSync(new URL('./fixtures/requirement-platform.json', import.meta.url), 'utf8'));
@@ -66,7 +67,7 @@ function replayCli(calls) {
 // snapshot rather than of a hand-built one.
 const BLOCK_IDS = ['synthetic', 'synthetic-h1', 'synthetic-p'];
 
-function scriptedChat(calls) {
+function scriptedChat(calls, { firstTitle = '大厅入口与倒计时', firstRule = '活动期间显示大厅入口。' } = {}) {
   const chat = async ({ prompt }) => {
     calls.push(prompt);
     if (prompt.includes('"facts":[{"kind"')) {
@@ -82,8 +83,8 @@ function scriptedChat(calls) {
           stories: [
             {
               key: 'M01',
-              title: '大厅入口与倒计时',
-              rules: [{ text: '活动期间显示大厅入口。', factIds: ['F1', 'F2'] }],
+              title: firstTitle,
+              rules: [{ text: firstRule, factIds: ['F1', 'F2'] }],
               acceptance: [{ text: '开启前可见倒计时。', factIds: ['F1'] }],
               dependencies: [],
               sourceIds: ['synthetic', 'synthetic-h1'],
@@ -166,7 +167,7 @@ async function endToEndHarness(overrides = {}) {
       workspace_id: WORKSPACE,
       name: '勋章挑战功能需求',
       parent_id: '0',
-      description: '<p>来源文档：https://example.feishu.cn/docx/syntheticDocToken</p>',
+      description: overrides.parentDescription ?? '<p>来源文档：https://example.feishu.cn/docx/syntheticDocToken</p>',
     }],
     created: [],
     reads: [],
@@ -208,15 +209,7 @@ async function endToEndHarness(overrides = {}) {
     hosts: config.requirements.documentHosts,
     assetsDir: config.requirements.paths.assetsDir,
   });
-  const decomposer = createDecomposer({ chat: scriptedChat(chatCalls) });
-  const target = {
-    workspaceId: WORKSPACE,
-    parentTypeId: config.requirements.projects.weapon.parentTypeId,
-    childTypeId: config.requirements.projects.weapon.childTypeId,
-    templateId: config.requirements.projects.weapon.templateId,
-    childDefaults: { owner: '已核实成员甲', iterationId: '1159180547001000128' },
-    parent: { mode: 'bind', storyId: PARENT_ID },
-  };
+  const decomposer = createDecomposer({ chat: scriptedChat(chatCalls, { firstTitle: overrides.storyTitle, firstRule: overrides.firstRule }) });
   const tapd = createTapdStories({
     tokenFile: 'C:/secrets/tapd.token',
     request: fakeTapdTransport(remote, overrides.transport ?? {}),
@@ -226,7 +219,7 @@ async function endToEndHarness(overrides = {}) {
     store,
     tapd,
     documents,
-    targets: { weapon: target },
+    targets: requirementTargets(config),
     clock: { now: clockNow },
   });
   const slot = createWorkSlot({ log: { info() {}, warn() {}, error() {} } });
@@ -355,7 +348,7 @@ async function endToEndHarness(overrides = {}) {
 test('a reviewed document creates only approved children under the bound parent', async () => {
   const h = await endToEndHarness();
   assert.equal(await h.sendPlanningDocument(), true, 'the planning message belongs to this flow');
-  assert.equal(h.cliCalls.filter((args) => args[0] === 'docs' && args[1] === '+fetch').length, 1, 'the document is read once');
+  assert.equal(h.cliCalls.filter((args) => args[0] === 'docs' && args[1] === '+fetch').length, 1, 'the analysis reads the document once');
 
   const request = h.request();
   assert.ok(request, 'the ledger holds the request');
@@ -451,35 +444,36 @@ test('a restart reopens the same ledger and does not create the batch twice', as
       hosts: h.config.requirements.documentHosts,
       assetsDir: h.config.requirements.paths.assetsDir,
     }),
-    targets: {
-      weapon: {
-        workspaceId: WORKSPACE,
-        parentTypeId: '1159180547001000025',
-        childTypeId: '1159180547001000027',
-        templateId: '1159180547001000039',
-        childDefaults: { owner: '已核实成员甲', iterationId: '1159180547001000128' },
-        parent: { mode: 'bind', storyId: PARENT_ID },
-      },
-    },
+    targets: requirementTargets(h.config),
     clock: { now: clockNow },
   });
   const batchId = recovered.submissions[0].batch.id;
   await resume.resume({ requestId: recovered.id, batchId, actorId: REVIEWER });
+  const resumed = reopened.list()[0];
+  assert.equal(resumed.blockedReason, '', `resume must not pause on the source check: ${resumed.blockedReason}`);
   assert.equal(h.remote.created.length, createdBefore, 'recovery never re-creates a landed story');
 });
 
-test('document text is escaped, never injected into the ticket markup', async () => {
-  const h = await endToEndHarness({
-    requirements: {
-      // The scripted facts carry the fixture's own plain text; the question that
-      // reaches TAPD is the document title, so the injection test rides on the
-      // snapshot title the reader took from the fixture content.
-    },
-  });
+test('model output is escaped, never injected into the ticket markup', async () => {
+  const h = await endToEndHarness({ firstRule: '活动期间显示大厅入口 <script>alert(1)</script>' });
   await h.sendPlanningDocument();
   await h.review({ selectedKeys: ["M01"], parentId: PARENT_ID });
 
   const created = h.remote.created.at(-1);
   assert.ok(created.description.includes('<br />'), 'the description keeps its real line breaks');
+  assert.ok(created.description.includes('&lt;script&gt;'), 'the tag is escaped, not dropped');
   assert.equal(/<script/i.test(created.description), false, 'no raw script tag reaches TAPD');
+});
+
+test('an existing parent whose body never mentions the document pauses the batch', async () => {
+  // No reviewer override here: the parent comes from the config, so the submitter
+  // must re-read it and refuse to write under a parent that does not cite this
+  // document.
+  const h = await endToEndHarness({ parentDescription: '<p>勋章挑战功能需求（未写来源）</p>' });
+  await h.sendPlanningDocument();
+  await h.review({ selectedKeys: ['M01'] });
+
+  const request = h.request();
+  assert.equal(request.blockedReason, 'PARENT_MISMATCH');
+  assert.equal(h.remote.created.length, 0, 'nothing is written under a mismatched parent');
 });

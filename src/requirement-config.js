@@ -142,3 +142,26 @@ export function normalizeRequirements(raw, { projects, tapd, analyze, root } = {
     },
   };
 }
+
+// The submitter builds TAPD payloads straight from this map (it needs the types
+// and the template, not just the workspace), so the entry point and the tests
+// must derive it the same way instead of each assembling their own shape.
+export function requirementTargets({ tapd, requirements } = {}) {
+  const targets = {};
+  for (const [projectId, entry] of Object.entries(requirements?.projects ?? {})) {
+    const workspaceId = tapd?.workspaces?.[projectId]?.workspaceId;
+    if (typeof workspaceId !== 'string' || workspaceId === '') {
+      throw new Error(`config: requirements.projects.${projectId} has no TAPD workspace id`);
+    }
+    targets[projectId] = {
+      workspaceId,
+      parentTypeId: entry.parentTypeId,
+      childTypeId: entry.childTypeId,
+      templateId: entry.templateId,
+      ...(entry.parentStoryId === undefined
+        ? {}
+        : { parent: { mode: 'bind', storyId: entry.parentStoryId } }),
+    };
+  }
+  return targets;
+}

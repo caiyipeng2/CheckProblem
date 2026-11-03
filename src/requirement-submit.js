@@ -12,7 +12,9 @@ import { createHash } from 'node:crypto';
 
 import { buildChildFields, buildParentFields } from './tapd-stories.js';
 
-const DEFAULT_MAX_ITEMS = 50;
+// The batch always carries the parent as an item, so the cap is one higher than
+// the story limit the card advertises (50 stories plus their parent).
+const DEFAULT_MAX_ITEMS = 51;
 const MARKER_KEY_LENGTH = 24;
 const MARKER_HASH_LENGTH = 16;
 const PARENT_KEY = 'parent';

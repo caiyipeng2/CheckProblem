@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { join } from 'node:path';
-import { normalizeRequirements } from '../src/requirement-config.js';
+import { normalizeRequirements, requirementTargets } from '../src/requirement-config.js';
 
 const projects = [
   { id: 'weapon', name: '武器店' },
@@ -318,4 +318,49 @@ test('project entries must be objects', () => {
   const raw = base();
   raw.projects.weapon = 'weapon';
   assertFieldError(() => normalizeRequirements(raw, options()), 'projects.weapon');
+});
+
+test('an existing parent story id is optional but must look like a TAPD id', () => {
+  const withParent = normalizeRequirements(
+    { ...base(), projects: { weapon: { ...base().projects.weapon, parentStoryId: '1159180547001004412' } } },
+    { projects, tapd, analyze, root: ROOT },
+  );
+  assert.equal(withParent.projects.weapon.parentStoryId, '1159180547001004412');
+
+  const without = normalizeRequirements(base(), { projects, tapd, analyze, root: ROOT });
+  assert.equal(without.projects.weapon.parentStoryId, undefined, 'absent stays absent');
+
+  for (const bad of ['', 'abc', '123', '1159180547001004412112345678901234567890123']) {
+    assert.throws(
+      () => normalizeRequirements(
+        { ...base(), projects: { weapon: { ...base().projects.weapon, parentStoryId: bad } } },
+        { projects, tapd, analyze, root: ROOT },
+      ),
+      /parentStoryId/,
+      bad,
+    );
+  }
+});
+
+test('the submitter target carries the types and template the payload needs', () => {
+  const normalized = normalizeRequirements(
+    { ...base(), projects: { weapon: { ...base().projects.weapon, parentStoryId: '1159180547001004412' } } },
+    { projects, tapd, analyze, root: ROOT },
+  );
+  const targets = requirementTargets({ tapd, requirements: normalized });
+
+  assert.deepEqual(targets.weapon, {
+    workspaceId: '59180547',
+    parentTypeId: 'parent-type',
+    childTypeId: 'child-type',
+    templateId: 'template',
+    parent: { mode: 'bind', storyId: '1159180547001004412' },
+  });
+
+  const withoutParent = requirementTargets({
+    tapd,
+    requirements: normalizeRequirements(base(), { projects, tapd, analyze, root: ROOT }),
+  });
+  assert.equal(withoutParent.weapon.parent, undefined, 'no configured parent, no bind entry');
+  assert.equal(withoutParent.weapon.childTypeId, 'child-type');
 });

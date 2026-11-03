@@ -47,6 +47,16 @@ test('terminal cards disable all controls', () => {
   }
 });
 
+test('a finished card does not claim the request is closed, but a closed one still does', () => {
+  const closed = JSON.stringify(buildQueryCard({ job: { ...job, status: 'completed' }, projects }));
+  assert.doesNotMatch(closed, /此请求已关闭/);
+  assert.match(closed, /查询完成，分析已发回群里/);
+
+  for (const status of ['cancelled', 'expired', 'failed', 'interrupted']) {
+    assert.match(JSON.stringify(buildQueryCard({ job: { ...job, status }, projects })), /此请求已关闭/, status);
+  }
+});
+
 test('custom timeout is displayed rather than a hard-coded ten minutes', () => {
   const rendered = JSON.stringify(buildQueryCard({ job: { ...job, timeoutSec: 120 }, projects }));
   assert.match(rendered, /2 分钟/);

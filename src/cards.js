@@ -52,9 +52,15 @@ export function buildQueryCard({ job, projects, tapd = null }) {
     ...(job.branch ? { initial_option: job.branch } : {}),
   };
   const status = LABELS[job.status] ?? '不可用';
+  // A finished job is not a closed one: its card may still carry a live TAPD
+  // button, so telling the operator to start over makes the filing look broken.
   const note = job.note || (active
     ? `选择变更会同步给所有成员。请等卡片刷新后再开始；${Math.ceil((job.timeoutSec ?? 600) / 60)} 分钟内有效。`
-    : job.status === 'running' ? '正在获取所选分支最新远端代码，请勿重复提交。' : '此请求已关闭，请通过新消息发起下一次查询。');
+    : job.status === 'running'
+      ? '正在获取所选分支最新远端代码，请勿重复提交。'
+      : job.status === 'completed'
+        ? '查询完成，分析已发回群里；如需继续排查请发新消息。'
+        : '此请求已关闭，请通过新消息发起下一次查询。');
   const submitted = job.tapd?.status === 'done' ? job.tapd : null;
   const showTapd = Boolean(tapd) && job.status === 'completed' && !submitted;
   const tapdRow = showTapd ? row([column([{

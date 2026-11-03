@@ -261,3 +261,68 @@ schtasks /Delete /TN "CheckProblem" /F
 - 预检索靠问句里的 ASCII 标识符（如 `reward_1001`）和中文二元组。中文没有分词，问题描述越笼统（「奖励没到」），线索越散；把出问题的接口名、配置键、报错文本写进提问，命中率会明显提高。
 - 分析是只读的：`copy` 模式只 fetch，`clone` 模式只有 git 同步会写仓库；模型本身拿不到写权限。
 - 游标跨重启保留：服务停机期间群里的消息不会丢，重启后凡是仍在最新 50 条内的，会照常触发（可能补发一次确认提示）。要避免这种补发，停服删除 `state/state.json`，重启后只处理启动之后的消息。
+
+## 需求拆分与 TAPD 父子需求
+
+把一份策划文档拆成「功能闭环」子需求，经人工审核后在 TAPD 建子需求单。**自动分析不等于自动建单**：机器人只出草稿，建单必须由审核人在卡片上逐张确认并提交。
+
+### 配置从哪来
+
+配置在 `requirements` 段，全部由服务端提供，文档与模型都不能改目标：
+
+| 键 | 作用 |
+|---|---|
+| `requirements.allowedSenders` | 允许发起拆分的 open_id 列表（非空） |
+| `requirements.reviewers` | 额外审核人；发起人默认也是审核人 |
+| `requirements.documentHosts` | 允许读取的文档域名（裸域名，如 `hellowd.feishu.cn`） |
+| `requirements.modelAttempt` | 指向 `analyze.attempts` 的下标；必须是 `kind:"chat"` 且带 `apiKeyFile`、`apiKeyEnv:""` 的项，凭据只从文件读 |
+| `requirements.projects.<项目id>` | 必须与 `tapd.workspaces` 有同名映射。字段：`parentTypeId`、`childTypeId`、`templateId`、`owners`、`iterationIds`，可选 `parentStoryId` |
+| `requirements.projects.<id>.parentStoryId` | 该文档已有关联父单时填这里。每个请求创建时就带着它，提交前会重新读取核对 workspace、`parent_id=0` 与正文里的文档 id；不一致则以 `PARENT_MISMATCH` 暂停，不会写到别的父单下。不填则提交时新建父单 |
+
+`state`/`assets` 路径由 `requirements.paths` 推导（`<root>/state/requirements.json`、`<root>/state/requirement-assets`），不需要手写。
+
+### 显式触发与修改
+
+- 触发：在群里 `@机器人 拆分需求 <文档链接>`。必须在允许的群里、由 `allowedSenders` 中的人发出，且链接域名在 `documentHosts` 内。
+- 修改：在卡片所在话题里回复 `修改拆分 <说明>`（必要时带请求号）。修改会递增草稿版本，旧的卡片按钮随之失效。
+- 「拆分需求/修改拆分」永远不会落到故障排查流程；运行中的查询会占用共享执行槽，新的重操作会收到忙提示。
+
+### 素材与排除
+
+- 文档里的图片、表格、白板、附件会按类型读取；**视频没有可用的自动读取能力，标记为待人工确认**，不会静默丢掉。
+- 读取失败的素材会记录原因并保留在来源清单里；审核卡上能看到素材状态。
+- 首版不把飞书附件复制上传到 TAPD，子单正文只写来源与追踪标识。
+
+### 审核与提交
+
+1. 草稿生成后机器人发出审核卡，按子单分页展示。
+2. 审核人逐张「查看详情」→「确认页」→ 对每张「批准 / 延期 / 排除」；每次决定都会让之前看到的版本作废，需要重新查看。
+3. 「提交」只把**已批准**的子单放进本批；延期的不建单，排除的不再提示。
+4. 已有父单必须绑定，绝不重复创建；同一批最多 50 张子单，超过会以 `BATCH_TOO_LARGE` 拒绝。
+5. 只有审核人可以操作；其他人点击不会改变任何状态。
+
+### 未知状态如何核对
+
+TAPD 没有幂等键，网络超时或 5xx 之后无法判断单子是否已建。台账会把该项记为 `unknown`，**不会自动重试**。处理方式：
+
+1. 先在 TAPD 里按标题搜一遍，确认是否已存在；
+2. 回到卡片点「核对」（reconcile），让它去读远端并把结果写回台账；
+3. 确认远端没有之后，才对同一请求重新提交。
+
+进程重启时，`submitting` 状态但批次里没有任何已发项的请求会被释放回 `needs_review`（`BATCH_NOT_STARTED`），可重新提交；其余中断的读取/分析会记为 `READ_INTERRUPTED`/`ANALYZE_INTERRUPTED`，原因会显示在审核卡上。
+
+### 停止与重启自测实例
+
+自测实例只认命令行里带 `--config state/card-test/config.json` 的那个进程：
+
+```
+node bin/checkproblem.js --config state/card-test/config.json
+```
+
+- 停止：先确认该 PID 的命令行确实包含上面的 `--config`，再终止；不要按进程名批量杀。
+- 重启：配置只在启动时读取，改完配置必须重启才生效。Windows 下用 `Start-Process` 脱离当前 shell 启动，日志见 `state/card-test/logs/app-<日期>.log`。
+- 正常关闭会先停止收新事件、在有界时间内等待已发起操作结束并持久化，最后释放进程锁；`SIGKILL` 无法等待，只能靠下次启动的未知结果恢复。
+
+### 回滚代码时台账必须保留
+
+`state/requirements.json` 是唯一的防重与恢复依据：删掉它，重启后就无法判断哪些子单已经建过，可能重复建单。回滚代码、换分支、重装依赖都不要删这个文件；卡片与报告可以清理，台账不行。

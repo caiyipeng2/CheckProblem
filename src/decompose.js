@@ -13,7 +13,10 @@ import {
 } from './requirement-draft.js';
 
 const DEFAULT_LIMITS = {
-  maxChunkChars: 12000,
+  // A real planning doc produced story units that could not pair under 12k, so
+  // the merge tree could never reduce and analysis ended as ANALYSIS_LIMIT.
+  // 32k keeps one merge call modest while letting large stories travel together.
+  maxChunkChars: 32000,
   maxModelCalls: 100,
   maxImagesPerCall: 4,
 };

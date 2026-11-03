@@ -615,6 +615,31 @@ test('the same press at the current version does submit', async () => {
   assert.equal(h.remote.created.filter((key) => key === 'parent').length, 1);
 });
 
+// 双击提交 / 并行回调, asserted directly: two `submit` callbacks for the same
+// request are fired with no gap at all. The claim is taken synchronously, the
+// freeze is re-gated inside the transaction and the submitter serializes per
+// request+batch, so the second press must end as an in-flight refusal, not as a
+// second batch and certainly not as a second story.
+test('two submit presses fired together freeze exactly one batch and create each story once', async () => {
+  const h = await reviewHarness();
+  const first = h.action('submit', { eventId: 'ev_double_1' });
+  const second = h.action('submit', { eventId: 'ev_double_2' });
+  assert.equal(h.flow.enqueue(first), true);
+  assert.equal(h.flow.enqueue(second), true);
+  await h.flow.whenIdle();
+
+  const request = h.store.get('r1');
+  assert.equal(request.submissions.length, 1, 'exactly one batch is frozen');
+  assert.equal(h.submitter.submit, 1, 'the submitter is entered once');
+  assert.equal(h.slot.state.owners.length, 1, 'the request is claimed once');
+  assert.deepEqual(h.remote.created.slice().sort(), ['M01', 'M02', 'parent'], 'each story is created exactly once');
+  assert.equal(h.remote.created.filter((key) => key === 'parent').length, 1, 'no duplicate parent');
+  const ids = h.remote.calls.map((call) => call.id);
+  assert.equal(new Set(ids).size, ids.length, 'no story is written twice under two ids');
+  assert.equal(request.status, 'completed');
+  assert.match(h.texts(), /正在处理其他重操作/, 'the second press hears the coded in-flight answer');
+});
+
 test('a well-formed open_id that is not on the request cannot approve or submit', async () => {
   const h = await reviewHarness();
   const before = h.store.get('r1');
@@ -627,6 +652,36 @@ test('a well-formed open_id that is not on the request cannot approve or submit'
   assert.equal(h.submitter.submit, 0);
 });
 
+// 身份 first: an actor who is not on the request must not be told anything about
+// the draft version, so a stale press from an outsider answers with the identity
+// refusal, never with the stale-version refusal. Both refuse; only the coded
+// outcome differs, and the order is the one the plan fixes.
+test('an unauthorized actor is not told that the version is stale', async () => {
+  const h = await reviewHarness();
+  await h.edit('修改拆分：把 M02 的验收改成分档结算');
+  assert.equal(h.store.get('r1').draft.version, 2, 'the reviewer moved the draft to v2');
+  const before = h.store.get('r1');
+  await h.press('approve', { key: 'M01', actor: OUTSIDER, draftVersion: 1 });
+  await h.press('submit', { actor: OUTSIDER, draftVersion: 1 });
+  const after = h.store.get('r1');
+  assert.equal(after.draft.version, before.draft.version);
+  assert.equal(after.submissions.length, 0);
+  assert.equal(h.submitter.submit, 0);
+  const heard = h.texts();
+  assert.match(heard, /不是本需求的审核人/, 'identity is answered before version');
+  assert.doesNotMatch(heard, /草稿已更新/, 'the stale-version code is not leaked to an outsider');
+});
+
+test('an authorized reviewer still gets the stale-version refusal', async () => {
+  const h = await reviewHarness();
+  const oldEvent = h.action('submit');
+  await h.edit('修改拆分：把 M02 的验收改成分档结算');
+  await h.run(oldEvent);
+  assert.equal(h.store.get('r1').submissions.length, 0);
+  assert.match(h.texts(), /草稿已更新/, 'the refusal strings stay distinct');
+  assert.doesNotMatch(h.texts(), /不是本需求的审核人/);
+});
+
 test('a cross-group press cannot approve or submit', async () => {
   const h = await reviewHarness();
   await h.press('approve', { key: 'M01', chatId: OTHER_CHAT });
@@ -635,6 +690,55 @@ test('a cross-group press cannot approve or submit', async () => {
   assert.equal(after.draft.version, 1);
   assert.equal(after.submissions.length, 0);
   assert.equal(h.submitter.submit, 0);
+});
+
+// A card callback is not the only write path: a natural-language 修改拆分 and a
+// thread reply both reach the same gate, so the chat has to come from the
+// incoming message (exactly as the callback path takes `event.chat_id`) instead
+// of being copied off the request. A same-thread reply stays in-chat.
+test('a natural-language edit from another group is refused and writes nothing', async () => {
+  const h = await reviewHarness();
+  const before = h.store.get('r1');
+  const accepted = await h.send('修改拆分 请求 r1：把 M01 的倒计时改成 3 天', {
+    chatId: OTHER_CHAT, actor: REVIEWER, messageId: 'om_foreign_edit',
+  });
+  await h.flow.whenIdle();
+  assert.equal(accepted, true, 'the message is still consumed by the workflow');
+  assert.equal(h.decomposer.calls.revise.length, 0, 'the model is never asked');
+  const after = h.store.get('r1');
+  assert.equal(after.draft.version, before.draft.version, 'no version bump');
+  assert.deepEqual(after.draft.decisions, [], 'no decision appended');
+  assert.equal(after.status, before.status);
+  assert.match(h.texts(), /不属于当前群/, 'the coded cross-chat refusal is what the reviewer hears');
+  // The refusal is delivered to the request's own chat, never to the foreign one.
+  assert.deepEqual(h.lark.sent.notices.filter((entry) => entry.chatId === OTHER_CHAT), []);
+  assert.deepEqual(h.lark.sent.replies.filter((entry) => entry.messageId === 'om_foreign_edit'), []);
+  assert.deepEqual(h.lark.sent.cardReplies.filter((entry) => entry.messageId === 'om_foreign_edit'), []);
+  assert.ok(h.lark.sent.replies.some((entry) => entry.messageId === CARD_MSG), 'the notice lands in the review thread');
+});
+
+test('a field-change reply from another group is refused and writes nothing', async () => {
+  const h = await reviewHarness();
+  const accepted = await h.send(`M01 · ${OWNER_B}`, {
+    chatId: OTHER_CHAT, parentId: CARD_MSG, mention: false, actor: REVIEWER, messageId: 'om_foreign_reply',
+  });
+  await h.flow.whenIdle();
+  assert.equal(accepted, true);
+  const after = h.store.get('r1');
+  assert.equal(after.draft.version, 1, 'the field change did not land');
+  assert.equal(after.draft.stories[0].owner, null);
+  assert.deepEqual(after.draft.decisions, []);
+  assert.match(h.texts(), /不属于当前群/);
+  assert.deepEqual(h.lark.sent.notices.filter((entry) => entry.chatId === OTHER_CHAT), []);
+  assert.deepEqual(h.lark.sent.replies.filter((entry) => entry.messageId === 'om_foreign_reply'), []);
+});
+
+test('the same-thread reply from the request chat still applies the change', async () => {
+  const h = await reviewHarness();
+  await h.send(`M01 · ${OWNER_B}`, { parentId: CARD_MSG, mention: false, actor: REVIEWER });
+  const after = h.store.get('r1');
+  assert.equal(after.draft.stories[0].owner, OWNER_B);
+  assert.equal(after.draft.version, 2, 'an in-chat thread reply is not cross-chat');
 });
 
 test('an outsider cannot drive the shared review card with a paging press', async () => {
@@ -1082,6 +1186,57 @@ test('an iteration change only accepts the configured allow-list', async () => {
   const request = h.store.get('r1');
   assert.equal(request.selections.iterationId, ITERATION);
   assert.equal(request.draft.version, 2);
+  assert.equal(request.draft.decisions.length, 1, 'one accepted change, one version, one decision');
+});
+
+// 字段变更 has to be revalidated, not just appended: the iteration reply mutates
+// the draft version and the decision log inside one transaction, so `validateDraft`
+// runs on the result there and a draft the policy cannot accept is refused whole.
+test('an iteration change that fails revalidation leaves the ledger untouched', async () => {
+  // F3 belongs to no story and to no exclusion: a draft the draft policy rejects.
+  const orphaned = reviewDraft({
+    facts: [
+      { id: 'F1', sourceIds: ['b_m01'], text: '活动期间，大厅显示勋章挑战入口。', kind: 'source' },
+      { id: 'F2', sourceIds: ['b_m02'], text: '挑战活动持续 14 天，结束后关闭入口。', kind: 'source' },
+      { id: 'F3', sourceIds: ['b_m01'], text: '文末补充：活动结束后排行榜保留 7 天。', kind: 'source' },
+    ],
+  });
+  const h = await reviewHarness({ draft: orphaned });
+  assert.throws(() => validateDraft({
+    draft: orphaned,
+    snapshot: makeSnapshot(),
+    actorIds: [INITIATOR, REVIEWER],
+  }), /UNCOVERED_FACT/);
+
+  await h.press('select_iteration');
+  const before = h.store.get('r1');
+  await h.send(ITERATION, { parentId: CARD_MSG, mention: false, actor: REVIEWER });
+
+  const after = h.store.get('r1');
+  assert.equal(after.draft.version, before.draft.version, 'no version bump');
+  assert.deepEqual(after.draft.decisions, before.draft.decisions, 'no decision appended');
+  assert.equal(after.selections, undefined, 'the rejected batch carries no selection');
+  assert.match(h.texts(), /校验失败/, 'the reviewer hears the coded revalidation refusal');
+  assert.equal(after.submissions.length, 0);
+});
+
+// The same discipline has to hold when there is nothing to revalidate: an
+// unprompted iteration reply on a request that has no draft yet is refused by the
+// revalidation step instead of crashing on the missing version.
+test('an iteration reply with no draft is refused, not thrown', async () => {
+  const h = await reviewHarness({ seed: false });
+  const noDraft = seededRequest();
+  delete noDraft.draft;
+  await h.store.transaction((state) => {
+    state.requests.r1 = noDraft;
+    return undefined;
+  });
+  const accepted = await h.send(ITERATION, { parentId: TRIGGER, mention: false, actor: REVIEWER });
+  assert.equal(accepted, true, 'the workflow still owns the message');
+  const after = h.store.get('r1');
+  assert.equal(after.draft, undefined);
+  assert.equal(after.selections, undefined, 'no selection is stored behind the refusal');
+  assert.match(h.texts(), /校验失败/);
 });
 
 test('the model never gets to choose people, targets or approval', async () => {
@@ -1160,6 +1315,42 @@ test('a confirm page that was not fully walked cannot be written', async () => {
   await h.press('submit');
   assert.equal(h.store.get('r1').submissions.length, 0);
   assert.equal(h.submitter.submit, 0);
+});
+
+// Thirty approved stories is what it takes to push the confirm card past one
+// segment, so the count the server-side gate uses is something a test can pin
+// exactly rather than a number the coordinator may guess.
+function wideStoryKeys(count = 30) {
+  return Array.from({ length: count }, (_, index) => `M${String(index + 1).padStart(2, '0')}`);
+}
+
+function multiPageConfirmDraft(keys) {
+  return makeDraft({
+    stories: keys.map((key, index) => story(key, index % 2 === 0 ? ['F1'] : ['F2'], {
+      title: `${key} 一个相当长的子单标题，用来把确认页撑到更多段，重复重复重复。`,
+      sourceIds: index % 2 === 0 ? ['b_m01'] : ['b_m02'],
+      dependencies: index === 0 ? [] : [keys[0]],
+    })),
+  });
+}
+
+test('the submit gate counts the real confirm series and accepts exactly the last page', async () => {
+  const keys = wideStoryKeys();
+  const seen = { draftVersion: 1, pagesSeen: [0], detailSeen: keys, confirmSeen: [0] };
+  const h = await reviewHarness({ draft: multiPageConfirmDraft(keys), viewByActor: { [REVIEWER]: seen } });
+  await h.press('submit');
+  assert.equal(h.store.get('r1').submissions.length, 0, 'one segment of a longer series is not the whole series');
+  assert.equal(h.submitter.submit, 0);
+  assert.match(h.texts(), /提交前条件|确认页/);
+
+  // Walking the last segment closes it: the ledger still holds an array, so the
+  // count really has to be 2 and no more.
+  await h.prime({ seen: { pagesSeen: [0], detailSeen: keys, confirmSeen: [0, 1] } });
+  await h.press('submit');
+  const request = h.store.get('r1');
+  assert.equal(request.submissions.length, 1, 'the gate accepted exactly two segments');
+  assert.equal(request.submissions[0].batch.stories.length, keys.length);
+  assert.equal(h.remote.created.filter((key) => key === 'parent').length, 1);
 });
 
 test('a parent that cannot be found is confirmed by a human, never rebuilt', async () => {

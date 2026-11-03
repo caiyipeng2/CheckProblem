@@ -12,7 +12,13 @@
 //     arrives here, so every check is re-run server-side, in the order the plan
 //     fixes: workflow → action allow-list → chat → card → identity → version →
 //     status. Identity is compared against the request's initiator/reviewers,
-//     never against the shape of the open_id.
+//     never against the shape of the open_id, and it is checked before the version
+//     so a stranger cannot learn which version is current.
+//   - The chat a write is judged in always comes from the event itself: `chat_id`
+//     for a card callback, `message.chat_id` for a 修改拆分 or a thread reply. It
+//     is never copied off the request, because the cards and the request id are
+//     shared in a group and quoting them from another group is not membership.
+//     Answers still go to the request's own chat.
 //   - The gate functions imported from requirement-cards are the single
 //     implementation of the review rules; this module calls them instead of
 //     restating them, so the button state and the write decision cannot drift.
@@ -521,8 +527,13 @@ export function createRequirementRequests({
       return { ok: false, code: 'UNKNOWN_CARD' };
     }
     const state = reviewState(request, value.actorId);
-    if (value.draftVersion !== state.version) return { ok: false, code: 'STALE_VERSION' };
+    // 身份 before 版本: the plan fixes the order as chat → card → identity →
+    // version, so an actor who is not on the request never learns whether the
+    // version they pressed at is current. Both refusals deny everything; only the
+    // coded outcome differs, and it stays distinct for the reviewer who *is* on
+    // the request.
     if (!state.allowed) return { ok: false, code: 'NOT_REVIEWER' };
+    if (value.draftVersion !== state.version) return { ok: false, code: 'STALE_VERSION' };
     if (nav) return { ok: true, state };
     // A batch that is being written holds the request: saying "提交中" is truer
     // than the generic status refusal, because the reason is the in-flight batch.
@@ -811,6 +822,28 @@ export function createRequirementRequests({
       return;
     }
 
+    // The confirm series length is only known by rendering the confirm card page
+    // by page (up to MAX_SERIES_WALK renders), so it is derived here, *before* the
+    // ledger transaction opens, instead of inside it: the transaction is the one
+    // serialised write window every other reviewer waits behind. The count is
+    // stamped with the draft version it was derived from and the transaction
+    // refuses to trust it across a version change — the same stale-void discipline
+    // the per-actor review ledger already uses.
+    const counted = store.get(requestId);
+    const preGate = gateRequest(counted, value);
+    let countedPages = null;
+    let countedVersion = -1;
+    if (preGate.ok) {
+      try {
+        countedPages = gatePageCount(counted, value.actorId, preGate.state);
+        countedVersion = preGate.state.version;
+      } catch (error) {
+        // No hint: the transaction re-derives the count and reports it there,
+        // exactly as it did before, so an unbounded series still fails the same way.
+        logLine('warn', `requirement confirm count deferred: ${safeCode(error)}`);
+      }
+    }
+
     let batchId = '';
     try {
       await store.transaction((state) => {
@@ -818,7 +851,11 @@ export function createRequirementRequests({
         if (!isPlainObject(target)) throw coded('UNKNOWN_REQUEST');
         const gate = gateRequest(target, value);
         if (!gate.ok) throw coded(gate.code);
-        const pageCount = gatePageCount(target, value.actorId, gate.state);
+        const pageCount = gate.state.confirmSeenValue === true
+          ? 1
+          : (countedPages !== null && countedVersion === gate.state.version
+            ? countedPages
+            : gatePageCount(target, value.actorId, gate.state));
         const reasons = submitGate(gate.state, pageCount);
         if (reasons.length > 0) {
           if (missingDetails(gate.state).length > 0 && !confirmSeenOk(gate.state, pageCount)) throw coded('NOTHING_TO_SUBMIT');
@@ -1086,8 +1123,10 @@ export function createRequirementRequests({
         const target = owns(state.requests, requestId) ? state.requests[requestId] : null;
         if (!isPlainObject(target)) throw coded('UNKNOWN_REQUEST');
         const state2 = reviewState(target, actorId);
-        if (state2.version !== baseVersion) throw coded('STALE_VERSION');
+        // Same order as `gateRequest`: 身份 before 版本, so the re-check inside the
+        // transaction cannot leak the version state to a non-reviewer either.
         if (!state2.allowed) throw coded('NOT_REVIEWER');
+        if (state2.version !== baseVersion) throw coded('STALE_VERSION');
         if (!state2.writable) throw coded('NOT_WRITABLE');
         if (state2.ledger.running) throw coded('BATCH_IN_FLIGHT');
         const revised = structuredClone(draft);
@@ -1284,7 +1323,10 @@ export function createRequirementRequests({
     const value = {
       requestId: request.id,
       draftVersion: reviewState(request, actorId).version,
-      chatId: request.chatId,
+      // The chat comes from the incoming message, exactly as the card-callback
+      // path takes `event.chat_id`, so naming the request from another group
+      // cannot spoof the gate; notices still go to the request's own chat.
+      chatId: firstString(message?.chat_id),
       messageId: firstString(classified.parentId, cardMessageIdOf(request), request.triggerMessageId),
       actorId,
       action: 'approve',
@@ -1310,16 +1352,42 @@ export function createRequirementRequests({
 
   async function applyReply(request, value, kind, decision) {
     if (kind === 'iteration') {
-      await write(request.id, (target) => {
-        const gate = gateRequest(target, value);
-        if (!gate.ok) throw coded(gate.code);
-        target.selections = { ...(isPlainObject(target.selections) ? target.selections : {}), iterationId: decision.iterationId };
-        target.draft.version += 1;
-        target.draft.decisions = [...listOf(target.draft.decisions), {
-          id: randomUUID(), actorId: value.actorId, text: `iteration: ${decision.iterationId}`, sourceIds: [],
-        }];
-        target.pendingInput = null;
-      });
+      // Chosen discipline: `validateDraft` inside this transaction, NOT
+      // `applyReviewDecision`. Its `select-fields` decision shape carries `owner`
+      // only and an iteration is a request-level selection (`selections.iterationId`,
+      // read back by `targetFor`), never a draft story field, so the pure policy has
+      // no decision type for it and none is invented here. The revalidation the plan
+      // demands (字段变更 递增草稿版本并重校验) is therefore run on the mutated draft
+      // in the same transaction, with exactly one version bump per accepted change
+      // and the whole change refused if the draft policy rejects it.
+      let failure = null;
+      try {
+        await write(request.id, (target) => {
+          const gate = gateRequest(target, value);
+          if (!gate.ok) throw coded(gate.code);
+          if (!isPlainObject(target.draft)) throw coded('VERIFY_FAILED');
+          target.selections = { ...(isPlainObject(target.selections) ? target.selections : {}), iterationId: decision.iterationId };
+          target.draft.version += 1;
+          target.draft.decisions = [...listOf(target.draft.decisions), {
+            id: randomUUID(), actorId: value.actorId, text: `iteration: ${decision.iterationId}`, sourceIds: [],
+          }];
+          target.pendingInput = null;
+          try {
+            validateDraft({ draft: target.draft, snapshot: target.snapshot, actorIds: actorsOf(target) });
+          } catch (error) {
+            // A revalidation failure answers with the one refusal that means "the
+            // draft policy did not accept this change"; the policy's own code is
+            // logged, never shown, so the chat keeps a fixed coded string.
+            logLine('warn', `requirement iteration revalidation failed: ${safeCode(error, 'VERIFY_FAILED')}`);
+            throw coded('VERIFY_FAILED');
+          }
+        });
+      } catch (error) {
+        failure = safeCode(error);
+      }
+      const fresh = store.get(request.id);
+      if (!isPlainObject(fresh)) return;
+      if (failure) await notice(fresh, refusal(failure));
       await refresh(request.id, value.actorId);
       return;
     }
@@ -1353,12 +1421,19 @@ export function createRequirementRequests({
     await commitDecision(request.id, value, decision);
   }
 
-  function replyValue(request, actorId, messageId) {
+  // The chat id is the message's own chat, never the request's: a reply written
+  // in another group is a cross-chat write even when it quotes the right request
+  // and the right thread. A reply in the card's thread is still in-chat, because
+  // that thread lives in the request's chat.
+  function replyValue(request, message, actorId) {
     return {
       requestId: request.id,
       draftVersion: reviewState(request, actorId).version,
-      chatId: request.chatId,
-      messageId: firstString(messageId, cardMessageIdOf(request), request.triggerMessageId),
+      chatId: firstString(message?.chat_id),
+      messageId: firstString(
+        message?.parent_id, message?.root_id, message?.message_id,
+        cardMessageIdOf(request), request.triggerMessageId,
+      ),
       actorId,
       action: 'answer',
       key: '',
@@ -1375,7 +1450,7 @@ export function createRequirementRequests({
   async function handleReply(request, message, actorId) {
     const text = extractPlainText(message).trim().slice(0, MAX_REPLY_CHARS);
     if (text === '') return false;
-    const value = replyValue(request, actorId, firstString(message?.parent_id, message?.root_id, message?.message_id));
+    const value = replyValue(request, message, actorId);
     const gate = gateRequest(request, value);
     if (!gate.ok) {
       await notice(request, refusal(gate.code));

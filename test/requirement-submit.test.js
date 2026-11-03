@@ -279,12 +279,13 @@ async function submissionHarness(options = {}) {
   };
 
   let clockAt = Date.parse('2026-10-31T00:00:00.000Z');
+  const clock = options.clock ?? { now: () => new Date(clockAt += 1) };
   const submitter = createRequirementSubmitter({
     store: storeFacade,
     tapd,
     documents,
     targets: options.targets ?? targets,
-    clock: { now: () => new Date(clockAt += 1) },
+    clock,
     limits: options.limits,
   });
 
@@ -347,6 +348,19 @@ test('first submit materializes frozen items in topological order', async (t) =>
   assert.equal(batch.parentStoryId, h.remote.stories[0].id);
   assert.deepEqual(h.remote.createdKeys, ['parent', 'M01', 'M02']);
   assert.equal(h.batch().items.find((i) => i.key === 'M02').storyId.length > 0, true);
+});
+
+test('a clock that reports epoch milliseconds still stamps a usable batch', async (t) => {
+  // bin/checkproblem.js wires the same `{ now: () => Date.now() }` shape the
+  // coordinator uses, but stamp() called .toISOString() on the number, so every
+  // real submit died as LEDGER_WRITE_FAILED before the first TAPD POST.
+  const h = await submissionHarness({ clock: { now: () => Date.parse('2026-10-31T00:00:00.000Z') } });
+  t.after(() => h.close());
+  await h.submitter.submit({ requestId: 'r1', batchId: 'b1' });
+  const batch = h.batch();
+  assert.equal(batch.status, 'completed');
+  assert.equal(batch.startedAt, '2026-10-31T00:00:00.000Z');
+  assert.deepEqual(h.remote.createdKeys, ['parent', 'M01', 'M02']);
 });
 
 test('a restart keeps the same markers and never replays created stories', async (t) => {

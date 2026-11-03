@@ -138,7 +138,9 @@ export function createRequirementSubmitter({
   const maxItems = Number.isInteger(limits?.maxItems) && limits.maxItems > 0
     ? limits.maxItems
     : DEFAULT_MAX_ITEMS;
-  const stamp = () => (clock && typeof clock.now === 'function' ? clock.now() : new Date()).toISOString();
+  // The coordinator's clock returns epoch milliseconds and bin/checkproblem.js
+  // wires the same shape here, so the value is normalized before stamping.
+  const stamp = () => new Date(clock && typeof clock.now === 'function' ? clock.now() : Date.now()).toISOString();
   const queues = new Map();
 
   // One batch at a time: a double click must observe the first run's ledger

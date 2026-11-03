@@ -31,6 +31,7 @@ const ROOT = join('tmp', 'service-root');
 const base = () => ({
   allowedSenders: ['ou_test'],
   reviewers: ['ou_reviewer'],
+  botOpenId: 'ou_bot',
   documentHosts: ['Hellowd.Feishu.CN'],
   modelAttempt: 0,
   projects: {
@@ -72,6 +73,7 @@ test('a valid requirements block is normalized and derives its paths', () => {
   const result = normalizeRequirements(base(), options());
   assert.deepEqual(result.allowedSenders, ['ou_test']);
   assert.deepEqual(result.reviewers, ['ou_reviewer']);
+  assert.equal(result.botOpenId, 'ou_bot');
   assert.deepEqual(result.documentHosts, ['hellowd.feishu.cn']);
   assert.equal(result.modelAttempt, 0);
   assert.equal(result.attempt, CHAT_ATTEMPT);
@@ -106,6 +108,18 @@ test('allowedSenders is required and non-empty', () => {
     const raw = base();
     raw.allowedSenders = allowedSenders;
     assertFieldError(() => normalizeRequirements(raw, options()), 'allowedSenders');
+  }
+});
+
+test('botOpenId is required and names the bot people actually mention', () => {
+  const trimmed = base();
+  trimmed.botOpenId = ' ou_bot ';
+  assert.equal(normalizeRequirements(trimmed, options()).botOpenId, 'ou_bot');
+
+  for (const botOpenId of [undefined, '', '   ', 42, 'bot', 'ou_', 'ou_bot!', null]) {
+    const raw = base();
+    raw.botOpenId = botOpenId;
+    assertFieldError(() => normalizeRequirements(raw, options()), 'botOpenId', ['ou_bot!']);
   }
 });
 

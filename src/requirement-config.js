@@ -24,6 +24,16 @@ function stringList(value, where, { allowEmpty }) {
 
 const HOSTNAME = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*$/;
 const MAX_HOSTNAME_LENGTH = 253;
+const OPEN_ID = /^ou_[A-Za-z0-9_-]{1,120}$/;
+
+// The poller runs under the service account, but the command mentions the bot.
+// Without an explicit bot id the mention check would compare against the wrong
+// account and the command would silently never trigger.
+function botOpenId(raw) {
+  const value = requiredString(raw, 'botOpenId');
+  if (!OPEN_ID.test(value)) fail('botOpenId', 'must be the bot open_id (ou_…)');
+  return value;
+}
 
 function documentHosts(raw) {
   const where = 'documentHosts';
@@ -137,6 +147,7 @@ export function normalizeRequirements(raw, { projects, tapd, analyze, root } = {
     'reviewers',
     { allowEmpty: true },
   ))];
+  const bot = botOpenId(raw.botOpenId);
   const hosts = documentHosts(raw.documentHosts);
   const attempt = modelAttempt(raw.modelAttempt, analyze);
   const entries = projectEntries(raw.projects, projects, tapd);
@@ -144,6 +155,7 @@ export function normalizeRequirements(raw, { projects, tapd, analyze, root } = {
   return {
     allowedSenders,
     reviewers,
+    botOpenId: bot,
     documentHosts: hosts,
     modelAttempt: raw.modelAttempt,
     attempt,

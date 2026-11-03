@@ -914,6 +914,38 @@ test('a start creates the request, reads, analyses and renders a review card', a
   assert.doesNotMatch(cardText, /apiKeyFile|secrets\/model\.key|stateFile/, 'no credential path reaches the card');
 });
 
+test('the mention is matched against the bot, not the service account', async () => {
+  // The poller runs under the service account (config.selfOpenId), but the
+  // command mentions the bot. Requirements name that bot separately so the
+  // trigger works even though the two identities differ.
+  const config = makeConfig({ selfOpenId: INITIATOR });
+  config.requirements.botOpenId = BOT;
+  const h = await reviewHarness({ seed: false, config });
+  const accepted = await h.send(`拆分需求 ${DOC_URL}`, { actor: REVIEWER, messageId: 'om_bot_mention' });
+  assert.equal(accepted, true);
+  assert.equal(h.store.list().length, 1);
+});
+
+test('in card mode the operator behind selfOpenId is not skipped as the service', async () => {
+  // With cards the bot answers as an app, so the account named by selfOpenId is
+  // the human operator; filtering it out would swallow every handwritten command.
+  const config = makeConfig({ selfOpenId: INITIATOR, projects: [{ id: 'weapon' }] });
+  config.requirements.botOpenId = BOT;
+  const h = await reviewHarness({ seed: false, config });
+  const accepted = await h.send(`拆分需求 ${DOC_URL}`, { actor: INITIATOR, messageId: 'om_self_start' });
+  assert.equal(accepted, true);
+  assert.equal(h.store.list().length, 1);
+});
+
+test('without cards the service account itself is still ignored', async () => {
+  const config = makeConfig({ selfOpenId: INITIATOR });
+  config.requirements.botOpenId = BOT;
+  const h = await reviewHarness({ seed: false, config });
+  const message = h.textMessage(`拆分需求 ${DOC_URL}`, { actor: INITIATOR, messageId: 'om_echo' });
+  assert.equal(await h.flow.handleMessage(message), false);
+  assert.equal(h.store.list().length, 0);
+});
+
 test('the confirm page shows the configured target, not an empty one', async () => {
   const config = makeConfig();
   config.requirements.projects.weapon.parentOwner = OWNER_A;

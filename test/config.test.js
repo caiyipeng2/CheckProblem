@@ -323,6 +323,7 @@ function requirementValue() {
     requirements: {
       allowedSenders: ['ou_test'],
       reviewers: ['ou_reviewer'],
+      botOpenId: 'ou_bot',
       documentHosts: ['hellowd.feishu.cn'],
       modelAttempt: 0,
       projects: {

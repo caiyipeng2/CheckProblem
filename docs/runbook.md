@@ -274,6 +274,7 @@ schtasks /Delete /TN "CheckProblem" /F
 |---|---|
 | `requirements.allowedSenders` | 允许发起拆分的 open_id 列表（非空） |
 | `requirements.reviewers` | 额外审核人；发起人默认也是审核人 |
+| `requirements.botOpenId` | 命令里被 @ 的机器人 open_id（`ou_…`，必填）。消息由服务账号身份轮询，@ 的是机器人，两个 open_id 不同；缺了会在启动时报错，而不是命令静默不触发 |
 | `requirements.documentHosts` | 允许读取的文档域名（裸域名，如 `hellowd.feishu.cn`） |
 | `requirements.modelAttempt` | 指向 `analyze.attempts` 的下标；必须是 `kind:"chat"` 且带 `apiKeyFile`、`apiKeyEnv:""` 的项，凭据只从文件读 |
 | `requirements.projects.<项目id>` | 必须与 `tapd.workspaces` 有同名映射。字段：`parentTypeId`、`childTypeId`、`templateId`、`owners`、`iterationIds`，可选 `parentStoryId`、`parentOwner`、`parentIterationId`、`titlePrefix` |
@@ -285,7 +286,7 @@ schtasks /Delete /TN "CheckProblem" /F
 
 ### 显式触发与修改
 
-- 触发：在群里 `@机器人 拆分需求 <文档链接>`。必须在允许的群里、由 `allowedSenders` 中的人发出，且链接域名在 `documentHosts` 内。
+- 触发：在群里 `@机器人 拆分需求 <文档链接>`。必须在允许的群里、由 `allowedSenders` 中的人发出，且链接域名在 `documentHosts` 内。卡片模式下机器人以应用身份回复，服务账号本人发的命令照常生效；只有无卡片的老模式才会过滤服务账号自己的回声。
 - 修改：在卡片所在话题里回复 `修改拆分 <说明>`（必要时带请求号）。修改会递增草稿版本，旧的卡片按钮随之失效。
 - 「拆分需求/修改拆分」永远不会落到故障排查流程；运行中的查询会占用共享执行槽，新的重操作会收到忙提示。
 

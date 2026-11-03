@@ -224,6 +224,10 @@ export function createRequirementRequests({
     && isPlainObject(lark)
     && isPlainObject(slot) && typeof slot.tryStart === 'function';
   const selfOpenId = firstString(config?.selfOpenId, requirements?.selfOpenId);
+  // The command mentions the bot, while the poller account is the service
+  // account; the two ids differ, so the mention check gets its own value.
+  const botOpenId = firstString(requirements?.botOpenId, selfOpenId);
+  const cardMode = Array.isArray(config?.projects) && config.projects.length > 0;
   const hosts = stringsOf(requirements?.documentHosts);
   const projects = isPlainObject(requirements?.projects) ? requirements.projects : {};
   const workspaces = isPlainObject(config?.tapd?.workspaces) ? config.tapd.workspaces : {};
@@ -277,7 +281,10 @@ export function createRequirementRequests({
   function isServiceMessage(message) {
     if (message?.sender?.sender_type === 'app') return true;
     const actor = actorIdOf(message);
-    return actor !== '' && actor === selfOpenId;
+    if (actor === '') return false;
+    // With cards the bot answers as an app, so the account named by selfOpenId
+    // is the human operator; only the legacy user-account echo needs hiding.
+    return cardMode ? false : actor === selfOpenId;
   }
 
   function hasAction(card, action) {
@@ -1619,7 +1626,7 @@ export function createRequirementRequests({
 
     let classified = null;
     try {
-      classified = classifyRequirementMessage(message, { selfOpenId, hosts, requests });
+      classified = classifyRequirementMessage(message, { selfOpenId: botOpenId, hosts, requests });
     } catch (error) {
       if (firstString(error?.message) === 'AMBIGUOUS_REQUEST') {
         await noticeMessage(message, NOTICE.ambiguous);

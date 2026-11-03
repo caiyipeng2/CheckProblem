@@ -95,12 +95,21 @@ function projectEntries(raw, projects, tapd) {
       fail(where, 'has no TAPD workspace mapping');
     }
     if (!isPlainObject(entry)) fail(where, 'must be an object');
+    // The document's existing parent is a deployment fact, so it comes from the
+    // config: a reviewer can see it as verified but never hand-type a new id.
+    const parentStoryId = entry.parentStoryId === undefined
+      ? ''
+      : requiredString(entry.parentStoryId, `${where}.parentStoryId`);
+    if (parentStoryId !== '' && !/^\d{6,32}$/.test(parentStoryId)) {
+      fail(`${where}.parentStoryId`, 'must be a TAPD story id');
+    }
     entries[projectId] = {
       parentTypeId: requiredString(entry.parentTypeId, `${where}.parentTypeId`),
       childTypeId: requiredString(entry.childTypeId, `${where}.childTypeId`),
       templateId: requiredString(entry.templateId, `${where}.templateId`),
       owners: stringList(entry.owners, `${where}.owners`, { allowEmpty: false }),
       iterationIds: stringList(entry.iterationIds, `${where}.iterationIds`, { allowEmpty: true }),
+      ...(parentStoryId === '' ? {} : { parentStoryId }),
     };
   }
   return entries;

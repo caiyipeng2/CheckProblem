@@ -1215,7 +1215,9 @@ export function createRequirementRequests({
       status: STATUS.AWAITING,
       document,
       docKey: `${document.kind}:${document.token}`,
-      parentStoryId: null,
+      // The existing parent is a config fact for this project, so every request
+      // starts already bound to it; the card can only confirm or replace it.
+      parentStoryId: firstString(requirements?.projects?.[projectId]?.parentStoryId) || null,
       submissions: [],
       viewByActor: {},
       blockedReason: projectId === '' ? 'PROJECT_UNRESOLVED' : '',

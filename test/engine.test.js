@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createEngine } from '../src/index.js';
 import { initialState } from '../src/state.js';
-import { CONFIRM_PROMPT, TIMEOUT_NOTICE, CANCELLED_NOTICE, BUSY_NOTICE } from '../src/reply.js';
+import { CONFIRM_PROMPT, TIMEOUT_NOTICE, CANCELLED_NOTICE, BUSY_NOTICE, WORK_BUSY_NOTICE } from '../src/reply.js';
 
 // Feishu create_time is a 13-digit millisecond timestamp string.
 const NOW = 1793162767785;
@@ -34,6 +34,33 @@ function awaitingJob(overrides = {}) {
     expiresAt: NOW + 600_000,
     confirmer: null,
     ...overrides,
+  };
+}
+
+// Stand-in for the 需求拆分 coordinator: the engine only owns the order in which
+// it is consulted, the consumption flag decides the rest.
+function requirementsStub({ handled = [], flushOrder = [] } = {}) {
+  const handledIds = new Set(handled);
+  const calls = { messages: [], events: [], flush: 0, idle: 0, order: [] };
+  return {
+    calls,
+    async handleMessage(message) {
+      calls.messages.push(message.message_id);
+      calls.order.push(`message:${message.message_id}`);
+      return handledIds.has(message.message_id);
+    },
+    enqueue(event) {
+      calls.events.push(event);
+      return true;
+    },
+    async flush() {
+      calls.flush += 1;
+      calls.order.push('flush');
+      flushOrder.push('flush');
+    },
+    async whenIdle() {
+      calls.idle += 1;
+    },
   };
 }
 
@@ -121,6 +148,7 @@ test('legacy analysis prompt uses synchronized provenance rather than a configur
   h.state.job = awaitingJob();
   h.setBatch([msg('om_2', NOW + 100, '确认')]);
   await h.engine.tick();
+  await h.engine.whenIdle();
   assert.equal(h.calls.prompts.length, 1);
   assert.match(h.calls.prompts[0], /feature\/启动@abc9876\+2/);
   assert.doesNotMatch(h.calls.prompts[0], /master@|最新远端/);
@@ -184,6 +212,7 @@ test('a confirm runs the analysis and replies to the trigger with the footer', a
   h.setBatch([msg('om_2', NOW + 100, '确认', 'ou_ops')]);
 
   await h.engine.tick();
+  await h.engine.whenIdle();
 
   assert.equal(h.state.job, null);
   assert.deepEqual(lookup, ['ou_ops']);
@@ -213,6 +242,7 @@ test('a clipped reply keeps the footer and the archive holds the full text', asy
   h.setBatch([msg('om_2', NOW + 100, '确认', 'ou_ops')]);
 
   await h.engine.tick();
+  await h.engine.whenIdle();
 
   const footer = '—— 蔡龙自动分析 · master@abc1234 · 由 运营A 确认';
   const reply = h.replies.at(-1);
@@ -298,6 +328,7 @@ test('an analysis failure replies with the reason and clears the job', async () 
   h.setBatch([msg('om_2', NOW + 100, '确认', 'ou_ops')]);
 
   await h.engine.tick();
+  await h.engine.whenIdle();
 
   assert.equal(h.state.job, null);
   assert.equal(h.calls.sync, 1);
@@ -319,6 +350,7 @@ test('chatter while awaiting is ignored but a later confirm in the same batch ru
   ]);
 
   await h.engine.tick();
+  await h.engine.whenIdle();
 
   assert.equal(h.replies.length, 2, 'the dropped question gets one notice, the confirm gets the result');
   assert.deepEqual(h.replies[0], { id: 'om_3', text: BUSY_NOTICE }, 'plain chatter draws nothing');
@@ -365,6 +397,7 @@ test('context lines from preceding messages reach the prompt', async () => {
   h.setNow(NOW + 1000);
   h.setBatch([...batch, msg('om_4', NOW + 1000, '确认', 'ou_ops')]);
   await h.engine.tick();
+  await h.engine.whenIdle();
 
   assert.equal(h.calls.prompts.length, 1);
   const prompt = h.calls.prompts[0];
@@ -521,6 +554,7 @@ test('the footer falls back to the open_id when the lookup returns no name', asy
   h.setBatch([msg('om_2', NOW + 100, '确认', 'ou_ops')]);
 
   await h.engine.tick();
+  await h.engine.whenIdle();
 
   assert.deepEqual(looked, ['ou_ops']);
   assert.match(h.replies.at(-1).text, /由 ou_ops 确认$/);
@@ -536,6 +570,7 @@ test('a throwing name lookup never blocks the analysis', async () => {
   h.setBatch([msg('om_2', NOW + 100, '确认', 'ou_ops')]);
 
   await h.engine.tick();
+  await h.engine.whenIdle();
 
   assert.equal(h.state.job, null);
   assert.equal(h.calls.prompts.length, 1);
@@ -568,6 +603,7 @@ test('the local search digest reaches the prompt sent to the model', async () =>
   h.setBatch([msg('om_2', NOW + 100, '确认', 'ou_ops')]);
 
   await h.engine.tick();
+  await h.engine.whenIdle();
 
   assert.equal(h.calls.prompts.length, 1);
   assert.match(h.calls.prompts[0], /【本地检索线索】/);
@@ -586,6 +622,7 @@ test('a failing search does not cost the analysis', async () => {
   h.setBatch([msg('om_2', NOW + 100, '确认', 'ou_ops')]);
 
   await h.engine.tick();
+  await h.engine.whenIdle();
 
   assert.equal(h.calls.prompts.length, 1, 'the analysis still runs');
   assert.match(h.calls.prompts[0], /本地检索线索】（无/);
@@ -627,9 +664,85 @@ test('a screenshot posted before 确认 reaches the legacy analysis and is clean
 
   h.setBatch([trigger, image, msg('om_2', NOW + 200, '确认')]);
   await h.engine.tick();
+  await h.engine.whenIdle();
 
   assert.equal(seen.options.images.length, 1);
   assert.match(seen.prompt, /【群内截图】/);
   assert.match(h.replies.at(-1).text, /配置缺失/);
   assert.equal(existsSync(join(root, 'images', 'om_1')), false);
+});
+
+test('a planning command consumed by the coordinator never opens a bug card', async () => {
+  const requirements = requirementsStub({ handled: ['om_plan'] });
+  const h = harness({ requirements });
+  h.setBatch([msg('om_plan', 100, '蔡龙 拆分需求 https://x.feishu.cn/docx/abc')]);
+
+  await h.engine.tick();
+
+  assert.deepEqual(h.replies, []);
+  assert.equal(h.state.job, null);
+  assert.deepEqual(h.state.lastSeen, { createTimeMs: 100, messageId: 'om_plan' });
+  assert.deepEqual(requirements.calls.messages, ['om_plan']);
+});
+
+test('a planning command the coordinator did not consume still never falls into the trigger path', async () => {
+  const requirements = requirementsStub({ handled: [] });
+  const h = harness({ requirements });
+  h.setBatch([
+    msg('om_plan', 100, '蔡龙 拆分需求 https://x.feishu.cn/docx/abc'),
+    msg('om_2', 200, '蔡龙 奖励没到账'),
+  ]);
+
+  await h.engine.tick();
+
+  assert.ok(!h.replies.some(({ id }) => id === 'om_plan'), 'the planning command draws no prompt');
+  assert.equal(h.state.job.status, 'awaiting');
+  assert.equal(h.state.job.triggerMessageId, 'om_2', 'the later plain question still works');
+});
+
+test('the coordinator recovery flush runs once before the first message is routed', async () => {
+  const requirements = requirementsStub();
+  const h = harness({ requirements });
+  h.setBatch([msg('om_1', 100, '蔡龙 奖励没到账')]);
+
+  await h.engine.tick();
+  await h.engine.tick();
+
+  assert.equal(requirements.calls.flush, 1, 'the one-shot recovery flush runs exactly once');
+  assert.deepEqual(requirements.calls.order.slice(0, 2), ['flush', 'message:om_1']);
+});
+
+test('a running analysis is never replaced by a new question', async () => {
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  const analyses = [];
+  const h = harness({ runAnalysis: async (prompt) => {
+    analyses.push(prompt);
+    await gate;
+    return { text: ANALYSIS };
+  } });
+  h.state.lastSeen = { createTimeMs: 0, messageId: '' };
+  h.setBatch([msg('om_1', 100, '蔡龙 奖励没到账')]);
+  await h.engine.tick();
+  h.setBatch([msg('om_1', 100, '蔡龙 奖励没到账'), msg('om_2', 200, '确认', 'ou_ops')]);
+  await h.engine.tick();
+  while (h.state.job?.status !== 'running') await new Promise((resolve) => setImmediate(resolve));
+
+  h.setBatch([
+    msg('om_1', 100, '蔡龙 奖励没到账'),
+    msg('om_2', 200, '确认', 'ou_ops'),
+    msg('om_3', 300, '蔡龙 另一个问题'),
+  ]);
+  await h.engine.tick();
+
+  assert.equal(h.state.job.status, 'running');
+  assert.equal(h.state.job.triggerMessageId, 'om_1', 'the running job is not replaced');
+  assert.deepEqual(h.replies.at(-1), { id: 'om_3', text: WORK_BUSY_NOTICE });
+  assert.equal(analyses.length, 1, 'the second question never reaches the model');
+
+  release();
+  await h.engine.whenIdle();
+  assert.equal(h.state.job, null);
+  assert.equal(analyses.length, 1, 'the running analysis is the only one, and it finishes');
+  assert.deepEqual(h.state.lastSeen, { createTimeMs: 300, messageId: 'om_3' });
 });

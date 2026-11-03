@@ -96,6 +96,9 @@ test('trigger -> prompt -> confirm -> analysis reply (dry run)', async () => {
   h.setNow(2000);
   h.setBatch([trigger, msg('om_2', 1500, '确认', 'ou_nanke')]);
   await h.engine.tick();
+  // The confirm starts the analysis behind the shared slot, so the tick returns
+  // before the reply exists; wait for the real work instead of sleeping.
+  await h.engine.whenIdle();
 
   // buildPrompt ran for real: the group question and its context are fenced
   // into the prompt handed to codex.

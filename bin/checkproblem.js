@@ -155,6 +155,8 @@ if (config.requirements && !config.dryRun) {
     log,
   });
   log.info(`requirements enabled for ${Object.keys(settings.projects).join(', ')}`);
+} else if (config.requirements) {
+  log.info('requirements disabled by --dry-run: no TAPD writes and no submissions');
 }
 
 const selectedRepo = (selection) => config.projects

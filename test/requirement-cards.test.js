@@ -183,6 +183,22 @@ test('renders bounded pages without silently dropping story details', () => {
 
 // ------------------------------------------------------------------ card shape
 
+test('every component name is unique within a card', () => {
+  // Feishu Card 2.0 rejects a card whose elements repeat a component name
+  // (230099 / ErrCode 11310, e.g. "name(approve) duplicate"), so per-story
+  // buttons cannot all be called "approve".
+  const request = makeRequest({
+    draft: draftWith(Array.from({ length: LIST_PAGE_SIZE }, (_, index) => storyAt(index))),
+  });
+  for (const mode of ['list', 'detail', 'confirm']) {
+    const card = buildRequirementCard({ request, view: view(mode), viewerId: REVIEWER });
+    const names = walk(card)
+      .filter((node) => typeof node.name === 'string')
+      .map((node) => node.name);
+    assert.equal(new Set(names).size, names.length, `${mode} repeats a component name`);
+  }
+});
+
 test('the draft version is carried by every mode and every callback', () => {
   const request = makeRequest({ draft: draftWith([storyAt(0)]) });
   request.draft.version = 7;
@@ -326,7 +342,7 @@ test('untrusted document text stays inert plain text in every card', () => {
     }
     for (const node of buttons(card)) {
       assert.ok(KNOWN_ACTIONS.has(actionOf(node)), 'every button is one of ours');
-      assert.equal(node.name, actionOf(node));
+      assert.equal(node.name.replace(/_\d+$/, ''), actionOf(node));
     }
   }
 });
@@ -575,11 +591,14 @@ test('paging and returning never carry an approval or any other write', () => {
   for (const card of cards) {
     for (const node of buttons(card)) {
       const value = node.behaviors[0].value;
-      // Detection is by the label the reviewer reads, not by the action inside:
+      // Component names carry a per-card sequence suffix for uniqueness; the
+      // label the reviewer reads is the action.
+      const name = node.name.replace(/_\d+$/, '');
+      // Detection is by the name the reviewer reads, not by the action inside:
       // a button called 下一页 has to carry a navigation action whatever the
       // callback says, and no button may advertise one action and send another.
-      assert.equal(node.name, value.action, `${node.name} sends exactly its own action`);
-      if (!/(_next|_prev)$/.test(node.name) && !['back', 'detail', 'confirm'].includes(node.name)) continue;
+      assert.equal(name, value.action, `${node.name} sends exactly its own action`);
+      if (!/(_next|_prev)$/.test(name) && !['back', 'detail', 'confirm'].includes(name)) continue;
       paging += 1;
       assert.ok(NAV_ACTIONS.has(value.action), `${node.name} is navigation`);
       assert.ok(!WRITE_ACTIONS.has(value.action), `${node.name} writes nothing`);

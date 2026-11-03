@@ -116,9 +116,14 @@ const text = (content) => ({ tag: 'div', text: plain(content) });
 const column = (elements, weight = 1) => ({ tag: 'column', width: 'weighted', weight, elements });
 const row = (columns) => ({ tag: 'column_set', flex_mode: 'none', horizontal_spacing: '8px', columns });
 
+// Card 2.0 wants every component name to be unique inside one card; a story
+// list renders one "approve" per story, so names get a per-build sequence.
+let buttonSeq = 0;
+
 function makeButton(name, label, value, disabled, type = 'default') {
+  buttonSeq += 1;
   return {
-    tag: 'button', name, text: plain(label), type, width: 'fill', disabled,
+    tag: 'button', name: `${name}_${buttonSeq}`, text: plain(label), type, width: 'fill', disabled,
     behaviors: [{ type: 'callback', value }],
   };
 }
@@ -927,6 +932,7 @@ export function buildRequirementCard({ request, view, viewerId } = {}) {
   if (!isPlainObject(request) || !isPlainObject(request.draft)) throw coded('INVALID_REQUEST');
   const mode = isPlainObject(view) ? view.mode : undefined;
   if (!MODES.has(mode)) throw coded('UNKNOWN_MODE');
+  buttonSeq = 0;
   const state = reviewState(request, viewerId);
 
   // `shownMode` is the mode the card really is: a stale detail view is rendered as

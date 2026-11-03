@@ -918,6 +918,7 @@ test('the confirm page shows the configured target, not an empty one', async () 
   const config = makeConfig();
   config.requirements.projects.weapon.parentOwner = OWNER_A;
   config.requirements.projects.weapon.parentIterationId = ITERATION;
+  config.requirements.projects.weapon.titlePrefix = '实验自测';
   const h = await reviewHarness({ seed: false, config });
   await h.send(`拆分需求 ${DOC_URL}`, { actor: INITIATOR, messageId: 'om_start' });
   const started = h.store.list()[0];
@@ -932,6 +933,7 @@ test('the confirm page shows the configured target, not an empty one', async () 
   assert.match(text, /模板：tpl-1/);
   assert.match(text, new RegExp(`父单负责人：${OWNER_A}`), 'the parent owner comes from config');
   assert.match(text, new RegExp(`父单迭代：${ITERATION}`), 'the parent iteration is independent of the child default');
+  assert.match(text, /标题前缀：实验自测/, 'the prefix the submitter will add is on the page');
   assert.ok(!text.includes('未配置'), 'no configured target field renders as unset');
 });
 

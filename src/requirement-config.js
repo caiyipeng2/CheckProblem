@@ -109,6 +109,9 @@ function projectEntries(raw, projects, tapd) {
     const parentIterationId = entry.parentIterationId === undefined
       ? ''
       : requiredString(entry.parentIterationId, `${where}.parentIterationId`);
+    const titlePrefix = entry.titlePrefix === undefined
+      ? ''
+      : requiredString(entry.titlePrefix, `${where}.titlePrefix`);
     entries[projectId] = {
       parentTypeId: requiredString(entry.parentTypeId, `${where}.parentTypeId`),
       childTypeId: requiredString(entry.childTypeId, `${where}.childTypeId`),
@@ -118,6 +121,7 @@ function projectEntries(raw, projects, tapd) {
       ...(parentStoryId === '' ? {} : { parentStoryId }),
       ...(parentOwner === '' ? {} : { parentOwner }),
       ...(parentIterationId === '' ? {} : { parentIterationId }),
+      ...(titlePrefix === '' ? {} : { titlePrefix }),
     };
   }
   return entries;
@@ -173,6 +177,7 @@ export function requirementTargets({ tapd, requirements } = {}) {
       parentTypeId: entry.parentTypeId,
       childTypeId: entry.childTypeId,
       templateId: entry.templateId,
+      ...(entry.titlePrefix === undefined ? {} : { titlePrefix: entry.titlePrefix }),
       ...(Object.keys(parent).length === 0 ? {} : { parent }),
     };
   }

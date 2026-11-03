@@ -276,9 +276,10 @@ schtasks /Delete /TN "CheckProblem" /F
 | `requirements.reviewers` | 额外审核人；发起人默认也是审核人 |
 | `requirements.documentHosts` | 允许读取的文档域名（裸域名，如 `hellowd.feishu.cn`） |
 | `requirements.modelAttempt` | 指向 `analyze.attempts` 的下标；必须是 `kind:"chat"` 且带 `apiKeyFile`、`apiKeyEnv:""` 的项，凭据只从文件读 |
-| `requirements.projects.<项目id>` | 必须与 `tapd.workspaces` 有同名映射。字段：`parentTypeId`、`childTypeId`、`templateId`、`owners`、`iterationIds`，可选 `parentStoryId`、`parentOwner`、`parentIterationId` |
+| `requirements.projects.<项目id>` | 必须与 `tapd.workspaces` 有同名映射。字段：`parentTypeId`、`childTypeId`、`templateId`、`owners`、`iterationIds`，可选 `parentStoryId`、`parentOwner`、`parentIterationId`、`titlePrefix` |
 | `requirements.projects.<id>.parentStoryId` | 该文档已有关联父单时填这里。每个请求创建时就带着它，提交前会重新读取核对 workspace、`parent_id=0` 与正文里的文档 id；不一致则以 `PARENT_MISMATCH` 暂停，不会写到别的父单下。不填则提交时新建父单 |
 | `requirements.projects.<id>.parentOwner` / `.parentIterationId` | 可选。新建父单时的负责人与迭代，与子单默认值互相独立；不填则父单不写这两项。绑定已有父单时以绑定单为准 |
+| `requirements.projects.<id>.titlePrefix` | 可选。新建父单与子单时统一加在标题最前面（例如自测填「实验自测」），计入 100 字标题上限，审核卡会显示此前缀。设置后按标题查重也用带前缀的标题，历史上无前缀的父单不会被自动找到，请改用 `parentStoryId` 绑定 |
 
 `state`/`assets` 路径由 `requirements.paths` 推导（`<root>/state/requirements.json`、`<root>/state/requirement-assets`），不需要手写。
 

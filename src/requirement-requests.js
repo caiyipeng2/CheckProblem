@@ -348,7 +348,18 @@ export function createRequirementRequests({
       parent.title = firstString(storedParent.title, request.snapshot?.title);
     }
     if (parent.mode === 'create' && parent.title === '') return null;
-    return { workspaceId, parentTypeId, childTypeId, templateId, owners, iterations, childDefaults, parent };
+    const titlePrefix = firstString(entry.titlePrefix);
+    return {
+      workspaceId,
+      parentTypeId,
+      childTypeId,
+      templateId,
+      ...(titlePrefix === '' ? {} : { titlePrefix }),
+      owners,
+      iterations,
+      childDefaults,
+      parent,
+    };
   }
 
   function verifiedParentIds(request) {

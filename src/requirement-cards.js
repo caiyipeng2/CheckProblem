@@ -549,6 +549,9 @@ function targetLines(request, state) {
   return [
     `目标项目：${clipTo(request.projectId ?? '未选择', ID_BYTES, byConfig)}（workspace ${clipTo(target.workspaceId ?? '未配置', ID_BYTES, byConfig)}）`,
     `父单类型：${clipTo(target.parentTypeId ?? '未配置', ID_BYTES, byConfig)}｜子单类型：${clipTo(target.childTypeId ?? '未配置', ID_BYTES, byConfig)}｜模板：${clipTo(target.templateId ?? '未配置', ID_BYTES, byConfig)}`,
+    ...(nonEmptyString(target.titlePrefix)
+      ? [`标题前缀：${clipTo(target.titlePrefix, ID_BYTES, byConfig)}（建单时加在父单与子单标题前）`]
+      : []),
     parentLine(request, state),
     `父单迭代：${clipTo(parent.iterationId ?? '未设置', ID_BYTES, byConfig)}`,
     `父单负责人：${clipTo(parent.owner ?? '未指定', ID_BYTES, byConfig)}`,

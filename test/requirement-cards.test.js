@@ -232,6 +232,24 @@ test('a blocked reason stays readable on the card after the one-shot notice is g
   assert.match(freeTextBody, /上次被挡住：原因未登记/, 'only the fixed placeholder is shown');
 });
 
+test('a configured title prefix is shown where the reviewed titles are written', () => {
+  const prefixed = targetRequest();
+  prefixed.target.titlePrefix = '实验自测';
+  const request = withSeen(prefixed, ['M01']);
+  assert.match(
+    body(buildRequirementCard({ request, view: view('confirm'), viewerId: REVIEWER })),
+    /标题前缀：实验自测/,
+    'the reviewer sees the prefix that will be added to every written title',
+  );
+
+  const plain = withSeen(targetRequest(), ['M01']);
+  assert.doesNotMatch(
+    body(buildRequirementCard({ request: plain, view: view('confirm'), viewerId: REVIEWER })),
+    /标题前缀/,
+    'no prefix configured, no line',
+  );
+});
+
 test('every callback value has exactly the fixed key set', () => {
   const request = withSeen(targetRequest({
     draft: draftWith([storyAt(0, { issueIds: ['Q1'] })], {

@@ -68,6 +68,12 @@ function cleanTitle(value) {
   return /[\uD800-\uDBFF]$/.test(clipped) ? clipped.slice(0, -1) : clipped;
 }
 
+// A self-test deployment marks every story it writes. The prefix is part of the
+// cleaned title so it counts against the TAPD limit and cannot be clipped off.
+function titled(value, prefix) {
+  return cleanTitle(`${firstValue(prefix)}${String(value ?? '')}`);
+}
+
 function firstValue(...values) {
   return values.find((value) => typeof value === 'string' && value !== '') ?? '';
 }
@@ -192,7 +198,7 @@ export function buildParentFields({ request, target, marker } = {}) {
 
   const fields = {
     workspace_id: target.workspaceId,
-    name: cleanTitle(title),
+    name: titled(title, target.titlePrefix),
     workitem_type_id: target.parentTypeId,
     templated_id: target.templateId,
     description: assembleDescription(lines, marker),
@@ -262,7 +268,7 @@ export function buildChildFields({
 
   const fields = {
     workspace_id: target.workspaceId,
-    name: cleanTitle(story?.title),
+    name: titled(story?.title, target.titlePrefix),
     parent_id: parentId,
     workitem_type_id: target.childTypeId,
     templated_id: target.templateId,

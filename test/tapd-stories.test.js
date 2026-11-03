@@ -1071,3 +1071,33 @@ test('each workspace reads its own token file and unknown workspaces inherit the
   await client.findParents({ workspaceId: '80000001', name: '总单', documentId: 'doc-1' });
   assert.deepEqual(auth, ['Bearer weapon-token', 'Bearer gear-token', 'Bearer global-token']);
 });
+
+test('a configured prefix goes in front of both parent and child titles', () => {
+  const prefixed = { ...target, titlePrefix: '实验自测' };
+  const parentFields = buildParentFields({ request: parentRequest(), target: prefixed, marker: MARKER });
+  assert.equal(parentFields.name, '实验自测勋章挑战系统（总单）');
+
+  const args = {
+    story: flatStory({ title: '大厅入口' }),
+    request: childRequest(),
+    parentId: 'P1',
+    dependencyIds: { M02: '1159180547001000777' },
+    marker: MARKER,
+  };
+  assert.equal(buildChildFields({ ...args, target: prefixed }).name, '实验自测大厅入口');
+  assert.equal(buildChildFields({ ...args, target }).name, '大厅入口', 'no prefix configured, no change');
+});
+
+test('the prefix is counted inside the TAPD title limit', () => {
+  const prefixed = { ...target, titlePrefix: '实验自测' };
+  const fields = buildChildFields({
+    story: flatStory({ title: '标'.repeat(400) }),
+    request: childRequest(),
+    target: prefixed,
+    parentId: 'P1',
+    dependencyIds: { M02: '1159180547001000777' },
+    marker: MARKER,
+  });
+  assert.ok(fields.name.startsWith('实验自测'), 'the prefix survives clipping');
+  assert.equal(fields.name.length, 100, 'the clipped title still fits the TAPD limit');
+});

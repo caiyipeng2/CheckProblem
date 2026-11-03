@@ -396,3 +396,29 @@ test('the parent half of the target is independent and optional', () => {
     );
   }
 });
+
+test('a configured title prefix reaches both the entry and the submitter target', () => {
+  const raw = {
+    ...base(),
+    projects: {
+      weapon: { ...base().projects.weapon, titlePrefix: '实验自测' },
+    },
+  };
+  const normalized = normalizeRequirements(raw, options());
+  assert.equal(normalized.projects.weapon.titlePrefix, '实验自测');
+
+  const targets = requirementTargets({ tapd, requirements: normalized });
+  assert.equal(targets.weapon.titlePrefix, '实验自测', 'the payload builder reads it from the target');
+  assert.equal(targets.weapon.workspaceId, '59180547');
+
+  for (const bad of ['', '   ', 7, null]) {
+    assert.throws(
+      () => normalizeRequirements(
+        { ...raw, projects: { weapon: { ...raw.projects.weapon, titlePrefix: bad } } },
+        options(),
+      ),
+      /titlePrefix/,
+      String(bad),
+    );
+  }
+});

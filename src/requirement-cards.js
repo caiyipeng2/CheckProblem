@@ -22,6 +22,10 @@
 //   - Reviewer state is read here and written by the coordinator (Task 10). A
 //     recorded seen-range whose draftVersion differs from the current draft is
 //     void: the card then behaves as if nothing had been read.
+//   - The submit and eligibility policy is exported for that coordinator: Task 10
+//     imports reviewState / splitEligible / submitGate / missingDetails /
+//     confirmSeenOk and runs the same checks server-side before freezeBatch,
+//     instead of re-deriving them and risking a gate that disagrees with the card.
 //   - An unknown submission outcome is never treated as "safe to resend": the
 //     submit button goes cold and 核对/继续 take over.
 //
@@ -43,11 +47,12 @@ export const PAGE_BODY_BYTES = 6000;
 // packing below still measures the real bytes.
 export const ATOM_BYTES = 1500;
 // List-view clips. The detail card always carries the full text, so a clip here
-// is a summary marker, never the only copy.
-export const LIST_TITLE_BYTES = 260;
-export const LIST_FIELD_BYTES = 240;
-export const LIST_REASON_LINES = 4;
-export const DOC_TITLE_BYTES = 200;
+// is a summary marker, never the only copy. These four are private to this file:
+// only the bounds a caller has to respect are exported.
+const LIST_TITLE_BYTES = 260;
+const LIST_FIELD_BYTES = 240;
+const LIST_REASON_LINES = 4;
+const DOC_TITLE_BYTES = 200;
 // Identifiers (workspace, story ids, types, templates, iterations, owners) are
 // short server-config values; they are shown for reading and clipped at this
 // bound so no single line can push the card over the transport limit.
@@ -205,6 +210,13 @@ function clampInt(value, count) {
   return Math.min(Math.floor(number), Math.max(0, count - 1));
 }
 
+// A draft without an integer version *is* version 0, and it has to be 0 in both
+// places that say so: the stamp inside every callback value and the staleness
+// test on a recorded seen range. Stamp 0 but compare against `undefined` and a
+// ledger written from the callback reads as stale forever, so 提交 stays cold and
+// the reviewer has no way to fix it from the card.
+const draftVersionOf = (draft) => (Number.isInteger(draft?.version) ? draft.version : 0);
+
 function toSet(value) {
   return new Set((Array.isArray(value) ? value : []).map((item) => String(item)));
 }
@@ -255,10 +267,24 @@ function readLedger(request) {
   };
 }
 
+// ---------------------------------------------------------------- shared policy
+// Exported because Task 10 owns the server side of the same rules: before it
+// freezes a batch it has to re-check 「审核人可选择无阻塞且依赖完整的子集」 and
+// 「最后提交前检查该审核人已查看选中子单的完整详情与确认页」. It imports these instead
+// of re-deriving them, so the gate a reviewer reads on the confirm card and the
+// gate that blocks the write are one implementation.
+//   reviewState(request, viewerId) → the state all four read
+//   splitEligible(request, candidateKeys, createdKeys) → { selected, blocked, batchLimit }
+//   submitGate(state, pageCount) → reason strings, empty means "may submit"
+//   missingDetails(state) → selected stories whose full detail was never read
+//   confirmSeenOk(state, pageCount) → whether every confirm page is in the ledger
+// The confirm card calls exactly these, and
+// `submitGate(...).length === 0` iff that card renders an enabled 提交 button.
+
 // The confirm page writes the largest unblocked, dependency-complete subset of
 // the approved stories; whatever falls out is named as 暂缓 with its code, so a
 // held-back story is visible instead of quietly missing.
-function splitEligible(request, candidateKeys, createdKeys) {
+export function splitEligible(request, candidateKeys, createdKeys) {
   let selected = [...candidateKeys];
   const blocked = new Map();
   let batchLimit = false;
@@ -325,8 +351,11 @@ function storyLabel(story) {
   return `${keyText(story.key)} ${clipTo(story.title, LIST_TITLE_BYTES)}`;
 }
 
-function reviewState(request, viewerId) {
-  const draft = request.draft;
+// Everything the exported policy below reads, in one place: the renderer and the
+// coordinator build the same state, so they cannot disagree about a gate.
+export function reviewState(request, viewerId) {
+  const draft = isPlainObject(request.draft) ? request.draft : {};
+  const version = draftVersionOf(draft);
   const stories = listOf(draft.stories);
   const ledger = readLedger(request);
   const candidates = stories
@@ -334,10 +363,13 @@ function reviewState(request, viewerId) {
     .map((story) => story.key);
   const { selected, blocked, batchLimit } = splitEligible(request, candidates, ledger.created);
   const record = isPlainObject(request.viewByActor) ? request.viewByActor[viewerId] : null;
-  const fresh = isPlainObject(record) && record.draftVersion === draft.version;
+  // Compared against the same normalisation the callback stamps, so a ledger
+  // written from a callback can never be read back as stale.
+  const fresh = isPlainObject(record) && record.draftVersion === version;
   const detailSeen = fresh ? toSet(record.detailSeen) : new Set();
   return {
     draft,
+    version,
     snapshot: isPlainObject(request.snapshot) ? request.snapshot : {},
     stories,
     byKey: new Map(stories.map((story) => [story.key, story])),
@@ -356,11 +388,11 @@ function reviewState(request, viewerId) {
   };
 }
 
-function missingDetails(state) {
+export function missingDetails(state) {
   return state.selected.filter((key) => !state.detailSeen.has(key));
 }
 
-function confirmSeenOk(state, pageCount) {
+export function confirmSeenOk(state, pageCount) {
   if (state.confirmSeenValue === true) return true;
   if (Array.isArray(state.confirmSeenValue) || state.confirmSeenValue instanceof Set) {
     // toSet() normalises to strings, so the page index has to be compared as one.
@@ -404,7 +436,7 @@ const gated = (state) => writeGate(state).length > 0;
 // card, so a stale page is clamped against the same count in both.
 const listPageCount = (state) => Math.max(1, Math.ceil(state.stories.length / LIST_PAGE_SIZE));
 
-function submitGate(state, pageCount) {
+export function submitGate(state, pageCount) {
   const reasons = [...writeGate(state)];
   if (state.ledger.running) reasons.push('已有批次正在写入，等结果落盘后再操作');
   else if (state.ledger.needsAttention) {
@@ -431,15 +463,25 @@ function commonLines(request, state, mode) {
   const out = [];
   out.push(clipTo(`文档：${state.snapshot.title ?? '未命名文档'}`, DOC_TITLE_BYTES));
   if (nonEmptyString(state.snapshot.url)) out.push(`链接：${clipTo(state.snapshot.url, DOC_TITLE_BYTES)}`);
-  out.push(`草稿 v${state.draft.version} · ${MODE_LABELS[mode]} · ${state.statusLabel}`);
+  out.push(`草稿 v${state.version} · ${MODE_LABELS[mode]} · ${state.statusLabel}`);
   if (!state.allowed) out.push('无审核权限：可查看全部内容，所有写入按钮不会生效。');
-  if (state.voided) out.push(`草稿版本已更新到 v${state.draft.version}，此前的查看范围作废，需要重新查看。`);
+  if (state.voided) out.push(`草稿版本已更新到 v${state.version}，此前的查看范围作废，需要重新查看。`);
   return out;
 }
 
+// The target block is server config and may be absent or half-filled, so every
+// read goes through these two guards rather than trusting the shape.
+function targetOf(request) {
+  return isPlainObject(request.target) ? request.target : {};
+}
+
+function parentOf(request) {
+  const parent = targetOf(request).parent;
+  return isPlainObject(parent) ? parent : {};
+}
+
 function parentLine(request, state) {
-  const target = isPlainObject(request.target) ? request.target : {};
-  const parent = isPlainObject(target.parent) ? target.parent : {};
+  const parent = parentOf(request);
   const boundId = nonEmptyString(request.parentStoryId)
     ? request.parentStoryId
     : (parent.mode === 'bind' && nonEmptyString(parent.storyId) ? parent.storyId : null);
@@ -449,17 +491,26 @@ function parentLine(request, state) {
 }
 
 function targetLines(request, state) {
-  const target = isPlainObject(request.target) ? request.target : {};
+  const target = targetOf(request);
   const defaults = isPlainObject(target.childDefaults) ? target.childDefaults : {};
+  const parent = parentOf(request);
   const byConfig = '以服务端配置为准';
   // An explicit allow-list: a token path or any other config field that happens
   // to ride along on the request must not reach the card.
+  //
+  // Spec 3.2 enumerates 父子类型、父单与子单迭代、负责人, and every one of those
+  // really is written: buildParentFields sends target.parent.owner and
+  // target.parent.iterationId alongside the child defaults, so the parent half
+  // belongs on this page too. A reviewer must not be able to authorise a parent
+  // creation whose two configured fields were never shown.
   return [
     `目标项目：${clipTo(request.projectId ?? '未选择', ID_BYTES, byConfig)}（workspace ${clipTo(target.workspaceId ?? '未配置', ID_BYTES, byConfig)}）`,
     `父单类型：${clipTo(target.parentTypeId ?? '未配置', ID_BYTES, byConfig)}｜子单类型：${clipTo(target.childTypeId ?? '未配置', ID_BYTES, byConfig)}｜模板：${clipTo(target.templateId ?? '未配置', ID_BYTES, byConfig)}`,
+    parentLine(request, state),
+    `父单迭代：${clipTo(parent.iterationId ?? '未设置', ID_BYTES, byConfig)}`,
+    `父单负责人：${clipTo(parent.owner ?? '未指定', ID_BYTES, byConfig)}`,
     `子单迭代：${clipTo(defaults.iterationId ?? '未设置', ID_BYTES, byConfig)}`,
     `子单负责人：${clipTo(defaults.owner ?? '未指定', ID_BYTES, byConfig)}`,
-    parentLine(request, state),
     `来源文档：${clipTo(state.snapshot.title ?? '未命名文档', DOC_TITLE_BYTES)} · ${clipTo(state.snapshot.revision ?? '未知版本', ID_BYTES, byConfig)}（指纹 ${clipTo(state.snapshot.fingerprint ?? '未记录', 80, byConfig)}）`,
   ];
 }
@@ -468,7 +519,9 @@ function callbackFor(request, action, key, page) {
   return {
     workflow: 'requirements',
     requestId: String(request.id ?? ''),
-    draftVersion: request.draft?.version ?? 0,
+    // The same normalisation reviewState compares a recorded ledger against: what
+    // the callback stamps is what the card will accept back.
+    draftVersion: draftVersionOf(request.draft),
     action,
     key: nonEmptyString(key) ? String(key) : '',
     page: Number.isInteger(page) && page > 0 ? page : 0,
@@ -499,12 +552,20 @@ function listButtons(request, state, page, pageCount) {
   return rows;
 }
 
-function renderList(request, state, view) {
+// `banner` is a line for the reader that arrives here from a view that no longer
+// exists (see the stale-storyKey path in buildRequirementCard); it goes first so
+// it is the thing the reviewer reads before the list itself.
+function renderList(request, state, view, banner = null) {
   const pageCount = listPageCount(state);
   const page = clampInt(view.page, pageCount);
   const stories = state.stories.slice(page * LIST_PAGE_SIZE, page * LIST_PAGE_SIZE + LIST_PAGE_SIZE);
   const lines = [...commonLines(request, state, 'list')];
+  if (nonEmptyString(banner)) lines.push(banner);
   lines.push(`子单清单 第 ${page + 1} / ${pageCount} 页（共 ${state.stories.length} 张）`);
+  // Required by the brief and true whatever this draft's page count is: paging is
+  // a property of the view, not of how much material happened to fit, so the
+  // statement is never conditioned on there being several pages.
+  lines.push('翻页只改变视图，不代表你已批准，也不代表其他人完成审核。');
   lines.push(seenSummary(state, state.selected.length, confirmSeenLabel(state, null)));
   if (state.candidates.length > MAX_BATCH_STORIES) {
     lines.push(`本批已批准 ${state.candidates.length} 张，超过单批上限 ${MAX_BATCH_STORIES} 张，需分批提交。`);
@@ -531,7 +592,9 @@ function renderList(request, state, view) {
       reasons.push(`问题 ${clipTo(issue.id, 40)}〔${flag}·${answered}〕${clipTo(issue.question, LIST_FIELD_BYTES)}`);
     }
     for (const resource of unreadResourcesFor(request, story.key)) {
-      reasons.push(clipTo(`未读素材：${resourceBody(resource)}`, LIST_FIELD_BYTES + 80));
+      // Same budget as any other reason line; the detail card repeats the whole
+      // material description, so a clip here is a pointer, not a loss.
+      reasons.push(clipTo(`未读素材：${resourceBody(resource)}`, LIST_FIELD_BYTES));
     }
     const shown = reasons.slice(0, LIST_REASON_LINES);
     for (const reason of shown) elements.push(text(`　${reason}`));
@@ -587,10 +650,16 @@ function detailAtoms(request, state, story) {
   return atoms;
 }
 
+// Returns null when the view names a story this draft no longer has. That is a
+// stale view rather than bad input: throwing here would leave Task 10 with no way
+// to update the shared card, so the group would keep staring at a dead story. The
+// caller falls back to the list. A view that names no story at all is unrenderable
+// input and still fails with a code.
 function renderDetail(request, state, view) {
   const key = nonEmptyString(view.storyKey) ? view.storyKey : null;
-  const story = key ? state.byKey.get(key) : null;
-  if (!story) throw coded('UNKNOWN_STORY');
+  if (key === null) throw coded('UNKNOWN_STORY');
+  const story = state.byKey.get(key);
+  if (!story) return null;
   const segments = packSegments(detailAtoms(request, state, story), PAGE_BODY_BYTES);
   const index = clampInt(view.detailPage, segments.length);
   const listPage = clampInt(view.page, listPageCount(state));
@@ -598,9 +667,9 @@ function renderDetail(request, state, view) {
   const lines = [...commonLines(request, state, 'detail')];
   lines.push(`子单 ${keyText(story.key)} · 第 ${index + 1} / ${segments.length} 段`);
   lines.push(seenSummary(state, state.selected.length, confirmSeenLabel(state, null)));
-  if (segments.length > 1) {
-    lines.push(`共 ${segments.length} 段，翻页只改变视图，不代表你已批准，也不代表其他人完成审核。`);
-  }
+  // Unconditional, like the list card's: 下一段 is a view change on every detail
+  // card, whether or not this story happened to need more than one segment.
+  lines.push(`共 ${segments.length} 段，翻页只改变视图，不代表你已批准，也不代表其他人完成审核。`);
   lines.push(`回答方式：在本卡片消息线程内回复“请求 ${clipTo(request.id ?? '', 40, '以服务端记录为准')} · 问题编号 · 你的答案”。`);
 
   const disabled = gated(state);
@@ -812,10 +881,24 @@ export function buildRequirementCard({ request, view, viewerId } = {}) {
   if (!MODES.has(mode)) throw coded('UNKNOWN_MODE');
   const state = reviewState(request, viewerId);
 
+  // `shownMode` is the mode the card really is: a stale detail view is rendered as
+  // the list, and the header says so instead of labelling a list 子单详情.
+  let shownMode = mode;
   let built;
-  if (mode === 'list') built = renderList(request, state, view);
-  else if (mode === 'detail') built = renderDetail(request, state, view);
-  else built = renderConfirm(request, state, view);
+  if (mode === 'list') {
+    built = renderList(request, state, view);
+  } else if (mode === 'detail') {
+    const detail = renderDetail(request, state, view);
+    if (detail === null) {
+      shownMode = 'list';
+      built = renderList(request, state, view,
+        `该子单 ${keyText(view.storyKey)} 已在 v${state.version} 中不存在，请从清单重新选择。`);
+    } else {
+      built = detail;
+    }
+  } else {
+    built = renderConfirm(request, state, view);
+  }
 
   const card = {
     schema: '2.0',
@@ -823,12 +906,12 @@ export function buildRequirementCard({ request, view, viewerId } = {}) {
       update_multi: true,
       enable_forward: false,
       width_mode: 'default',
-      summary: { content: `需求拆分审核 v${state.draft.version} · ${MODE_LABELS[mode]}` },
+      summary: { content: `需求拆分审核 v${state.version} · ${MODE_LABELS[shownMode]}` },
     },
     header: {
       title: plain('需求拆分审核'),
       template: 'blue',
-      subtitle: plain(`${MODE_LABELS[mode]} · v${state.draft.version} · ${state.statusLabel}`),
+      subtitle: plain(`${MODE_LABELS[shownMode]} · v${state.version} · ${state.statusLabel}`),
       icon: { tag: 'standard_icon', token: 'file-form_colorful' },
     },
     body: {

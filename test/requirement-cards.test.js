@@ -13,6 +13,11 @@ import {
   CARD_MAX_BYTES,
   LIST_PAGE_SIZE,
   PAGE_BODY_BYTES,
+  confirmSeenOk,
+  missingDetails,
+  reviewState,
+  splitEligible,
+  submitGate,
 } from '../src/requirement-cards.js';
 import { makeDraft, makeRequest } from './requirement-fixtures.js';
 
@@ -116,7 +121,13 @@ function targetRequest(overrides = {}) {
       templateId: 'tpl-1',
       owners: ['已核实成员甲', '已核实成员乙'],
       iterationIds: ['0', '1159180547001000128'],
-      parent: { mode: 'bind', storyId: '1159180547001004412' },
+      // The real target shape carries the parent's own owner and iteration: both
+      // go into the parent payload (src/tapd-stories.js buildParentFields), so
+      // the confirm page has to show them before anyone can authorise the write.
+      parent: {
+        mode: 'bind', storyId: '1159180547001004412', title: '勋章挑战系统（总单）',
+        owner: 'parent_owner_甲', iterationId: '1159180547001000111',
+      },
       childDefaults: { iterationId: '1159180547001000128', owner: '已核实成员甲' },
     },
     ...overrides,
@@ -214,7 +225,9 @@ test('sensitive target fields never travel inside a callback value', () => {
       const json = JSON.stringify(value);
       assert.ok(!json.includes('59180547'), 'no workspace id in a callback');
       assert.ok(!json.includes('1159180547001004412'), 'no parent story id in a callback');
-      assert.ok(!json.includes('1159180547001000128'), 'no iteration id in a callback');
+      assert.ok(!json.includes('1159180547001000128'), 'no child iteration id in a callback');
+      assert.ok(!json.includes('1159180547001000111'), 'no parent iteration id in a callback');
+      assert.ok(!json.includes('parent_owner_甲'), 'no parent owner in a callback');
       assert.ok(!json.includes('已核实成员甲'), 'no owner in a callback');
       assert.ok(!json.includes('type-child'), 'no workitem type in a callback');
     }
@@ -267,7 +280,10 @@ test('an invalid mode or an unknown story key fails with a fixed code', () => {
   const cases = [
     [() => buildRequirementCard({ request, view: { mode: 'nope' }, viewerId: REVIEWER }), 'UNKNOWN_MODE'],
     [() => buildRequirementCard({ request, view: {}, viewerId: REVIEWER }), 'UNKNOWN_MODE'],
-    [() => buildRequirementCard({ request, view: { mode: 'detail', storyKey: 'M99' }, viewerId: REVIEWER }), 'UNKNOWN_STORY'],
+    // A detail view that names no story is unrenderable input. A view that names
+    // a story the draft no longer has is a stale view, and it falls back to the
+    // list instead of throwing — see the stale-storyKey case below.
+    [() => buildRequirementCard({ request, view: { mode: 'detail' }, viewerId: REVIEWER }), 'UNKNOWN_STORY'],
     [() => buildRequirementCard({ request: null, view: { mode: 'list' }, viewerId: REVIEWER }), 'INVALID_REQUEST'],
     [() => buildRequirementCard({ request: { id: 'r' }, view: { mode: 'list' }, viewerId: REVIEWER }), 'INVALID_REQUEST'],
   ];
@@ -490,6 +506,9 @@ test('paging and returning never carry an approval or any other write', () => {
     rules: Array.from({ length: 20 }, (_, n) => ({ text: `第${n + 1}条：${'规则正文'.repeat(60)}`, factIds: ['F1'] })),
   };
   const request = withSeen(targetRequest({ draft: draftWith(stories) }), stories.map((story) => story.key));
+  // Purity is a property of the whole input, not of one field that happens to be
+  // set by the fixture: snapshot everything the walks read and compare it back.
+  const before = structuredClone(request);
   const cards = [
     ...collect(request, REVIEWER, (page) => view('list', { page })),
     ...collect(request, REVIEWER, (detailPage) => view('detail', { detailPage })),
@@ -511,7 +530,10 @@ test('paging and returning never carry an approval or any other write', () => {
     }
   }
   assert.ok(paging >= 3, 'the walk really produced paging controls');
-  assert.equal(request.draft.stories[0].disposition, 'approved', 'rendering is pure');
+  // One field's value proves nothing about the rest of the input — the fixture
+  // already defaults it, so the old assertion could not fail. Compare the whole
+  // request the walks read, value for value.
+  assert.deepEqual(request, before, 'rendering changed nothing in the input');
 });
 
 test('choosing a target, owner or iteration does not imply approval', () => {
@@ -672,6 +694,101 @@ test('a confirm ledger may be a set of page indices', () => {
   assert.equal(buttonFor(card, 'submit').disabled, false);
 });
 
+// ------------------------------------------------- the policy surface Task 10 shares
+// 「最后提交前检查该审核人已查看选中子单的完整详情与确认页」 and
+// 「审核人可选择无阻塞且依赖完整的子集」 are decided once, here. The coordinator has
+// to run the same checks server-side before freezeBatch, so the gate the reviewer
+// reads and the gate the write obeys must not be two implementations that drift.
+
+function gateCase(request, viewerId) {
+  const card = buildRequirementCard({ request, view: view('confirm'), viewerId });
+  const match = /确认页 第 \d+ \/ (\d+) 页/.exec(body(card));
+  assert.ok(match, 'the confirm card states its own page count');
+  // The page count is read off the rendered card, so the exported gate is asked
+  // exactly the question the card answered.
+  return { card, blockers: submitGate(reviewState(request, viewerId), Number(match[1])) };
+}
+
+test('the exported submit gate opens exactly when the confirm card enables 提交', () => {
+  const ready = (stories, extra = {}) => withSeen(targetRequest({ draft: draftWith(stories) }),
+    stories.map((story) => story.key), extra);
+
+  const unreadDetail = ready([storyAt(0), storyAt(1)]);
+  unreadDetail.viewByActor[REVIEWER].detailSeen = ['M01'];
+
+  const unreadMaterial = ready([storyAt(0), storyAt(1)]);
+  for (const story of unreadMaterial.draft.stories) story.sourceIds = ['b_m01', 'r_video'];
+
+  const overLimit = ready(Array.from({ length: MAX_BATCH_STORIES + 1 }, (_, index) => storyAt(index)));
+
+  const nothingApproved = ready([storyAt(0)]);
+  nothingApproved.draft.stories[0].disposition = 'proposed';
+
+  const cancelled = ready([storyAt(0)]);
+  cancelled.status = 'cancelled';
+
+  const unknown = ready([storyAt(0)]);
+  unknown.submissions = [submission({ status: 'needs_review', items: [
+    { key: 'parent', marker: 'req-parent-0000000000000000', status: 'created', storyId: '1159180547001000000' },
+    { key: 'M01', marker: 'req-M01-0000000000000000', status: 'unknown', storyId: null },
+  ] })];
+
+  const cases = [
+    ['a fully read batch', ready([storyAt(0), storyAt(1)]), REVIEWER, true],
+    ['one story whose detail is unread', unreadDetail, REVIEWER, false],
+    ['an unread confirm page', ready([storyAt(0)], { confirmSeen: false }), REVIEWER, false],
+    ['every story held by unread material', unreadMaterial, REVIEWER, false],
+    ['a batch over the single-submit limit', overLimit, REVIEWER, false],
+    ['nothing approved yet', nothingApproved, REVIEWER, false],
+    ['a cancelled request', cancelled, REVIEWER, false],
+    ['an unknown submission result', unknown, REVIEWER, false],
+    ['a viewer without review rights', ready([storyAt(0)]), 'ou_stranger', false],
+  ];
+
+  for (const [name, request, viewerId, expectOpen] of cases) {
+    const { card, blockers } = gateCase(request, viewerId);
+    const submit = buttonFor(card, 'submit');
+    assert.ok(submit, `${name}: the confirm page offers 提交`);
+    assert.equal(blockers.length === 0, expectOpen,
+      `${name}: exported gate blockers are ${JSON.stringify(blockers)}`);
+    assert.equal(submit.disabled, !expectOpen, `${name}: the button agrees with the expectation`);
+    // The iff itself: no blockers exactly when, and only when, the button is live.
+    assert.equal(blockers.length === 0, submit.disabled === false,
+      `${name}: the card and the exported gate are one decision`);
+    if (blockers.length > 0) {
+      assert.match(body(card), /提交前还需/, `${name}: the card says what is still missing`);
+    }
+  }
+});
+
+test('the exported eligibility helpers are the ones the card renders from', () => {
+  const unread = withSeen(targetRequest({ draft: draftWith([storyAt(0), storyAt(1), storyAt(2)]) }), ['M01', 'M02']);
+  const state = reviewState(unread, REVIEWER);
+  assert.deepEqual(missingDetails(state), ['M03'], 'the exported helper names the same unread detail');
+  assert.match(body(buildRequirementCard({ request: unread, view: view('confirm'), viewerId: REVIEWER })),
+    /尚未查看完整详情：M03/, 'and the card names the same story');
+
+  const held = withSeen(targetRequest({ draft: draftWith([storyAt(0), storyAt(1), storyAt(2)]) }),
+    ['M01', 'M02', 'M03']);
+  held.draft.stories[2].sourceIds = ['b_m01', 'r_video'];
+  const heldState = reviewState(held, REVIEWER);
+  const { selected, blocked } = splitEligible(held, heldState.candidates, heldState.ledger.created);
+  assert.deepEqual(selected, ['M01', 'M02'], 'the subset policy is shared, not re-derived');
+  assert.deepEqual([...blocked.keys()], ['M03'], 'the held-back story is named with its code');
+  assert.deepEqual([...blocked.get('M03')], ['UNREAD_RESOURCE']);
+  assert.deepEqual(heldState.selected, selected, 'the card used this same call');
+  assert.match(body(buildRequirementCard({ request: held, view: view('confirm'), viewerId: REVIEWER })),
+    /待创建子单（2 张）/, 'and listed exactly that subset');
+
+  assert.equal(confirmSeenOk(heldState, 1), true, 'a true ledger covers any page count');
+  const paged = withSeen(targetRequest({ draft: draftWith([storyAt(0)]) }), ['M01'], { confirmSeen: [0] });
+  const pagedState = reviewState(paged, REVIEWER);
+  assert.equal(confirmSeenOk(pagedState, 1), true, 'one page read is enough for a one-page card');
+  assert.equal(confirmSeenOk(pagedState, 2), false, 'a per-page ledger only settles when every page is read');
+  const cold = withSeen(targetRequest({ draft: draftWith([storyAt(0)]) }), ['M01'], { confirmSeen: false });
+  assert.equal(confirmSeenOk(reviewState(cold, REVIEWER), 1), false, 'nothing read is nothing settled');
+});
+
 test('the confirm page separates what can go out from what is held back', () => {
   const request = withSeen(targetRequest({ draft: draftWith([
     storyAt(0, { sourceIds: ['b_m01', 'r_video'] }),
@@ -789,15 +906,27 @@ test('a cancelled request keeps its detail readable and every control cold', () 
 
 test('the confirm page names the parent mode and target it will write', () => {
   const creating = withSeen(targetRequest({ draft: draftWith([storyAt(0)]) }), ['M01']);
-  creating.target = { ...creating.target, parent: { mode: 'create' } };
+  creating.target = { ...creating.target, parent: { ...creating.target.parent, mode: 'create' } };
   const text = body(buildRequirementCard({ request: creating, view: view('confirm'), viewerId: REVIEWER }));
-  assert.match(text, /新建父单 勋章挑战系统/);
+  assert.ok(text.includes('父单：新建父单 勋章挑战系统（总单）'),
+    'create mode names the parent title it will write');
   assert.match(text, /目标项目：weapon/);
   assert.match(text, /子单类型：type-child/);
+  assert.match(text, /父单迭代：1159180547001000111/, 'the parent iteration is shown before it is written');
+  assert.match(text, /父单负责人：parent_owner_甲/, 'and so is the parent owner');
   assert.match(text, /子单迭代：1159180547001000128/);
   assert.match(text, /子单负责人：已核实成员甲/);
   assert.match(text, /勋章挑战系统 · rev-1/, 'the source version is on the confirm page');
   assert.match(text, /模板：tpl-1/);
+
+  // An unset parent field is still named, so a blank is a visible blank instead
+  // of a line that quietly disappears from the page the reviewer authorises.
+  const bare = withSeen(targetRequest({ draft: draftWith([storyAt(0)]) }), ['M01']);
+  bare.target = { ...bare.target, parent: { mode: 'create' } };
+  const bareText = body(buildRequirementCard({ request: bare, view: view('confirm'), viewerId: REVIEWER }));
+  assert.match(bareText, /父单迭代：未设置/);
+  assert.match(bareText, /父单负责人：未指定/);
+  assert.ok(bareText.includes('父单：新建父单 勋章挑战系统'), 'with no parent title the document title is used');
 
   const bound = withSeen(targetRequest({
     draft: draftWith([storyAt(0)]),
@@ -815,4 +944,71 @@ test('a stale view page is clamped instead of rendering an empty card', () => {
   const detail = buildRequirementCard({ request, view: view('detail', { detailPage: 42 }), viewerId: REVIEWER });
   assert.match(body(detail), /第 1 \/ 1 段/);
   fits(detail);
+});
+
+test('the paging disclaimer is on every paged card, not only on a multi-page one', () => {
+  // The brief requires the statement, and a reviewer reads it on the page they
+  // are actually on: a two-story draft fits one list page and one detail segment,
+  // and the 下一页/下一段 controls are still absent, so the statement cannot be
+  // conditioned on this draft having several pages.
+  const request = withSeen(targetRequest({ draft: draftWith([storyAt(0), storyAt(1)]) }), ['M01', 'M02']);
+  const list = buildRequirementCard({ request, view: view('list'), viewerId: REVIEWER });
+  assert.match(body(list), /第 1 \/ 1 页/, 'this list really is a single page');
+  assert.match(body(list), /翻页只改变视图，不代表你已批准，也不代表其他人完成审核/);
+  const detail = buildRequirementCard({ request, view: view('detail'), viewerId: REVIEWER });
+  assert.match(body(detail), /第 1 \/ 1 段/, 'and this detail really is a single segment');
+  assert.match(body(detail), /翻页只改变视图，不代表你已批准，也不代表其他人完成审核/);
+  fits(list);
+  fits(detail);
+
+  const many = withSeen(targetRequest({
+    draft: draftWith(Array.from({ length: 6 }, (_, index) => storyAt(index))),
+  }), Array.from({ length: 6 }, (_, index) => `M${String(index + 1).padStart(2, '0')}`));
+  const paged = buildRequirementCard({ request: many, view: view('list'), viewerId: REVIEWER });
+  assert.match(body(paged), /第 1 \/ 2 页/);
+  assert.match(body(paged), /翻页只改变视图，不代表你已批准，也不代表其他人完成审核/);
+});
+
+test('a draft with no version still stamps 0 and stays submittable', () => {
+  // The stamp inside a callback and the staleness test have to agree, or a ledger
+  // written from that callback reads as stale forever and 提交 is permanently cold.
+  const request = targetRequest({ draft: draftWith([storyAt(0)]) });
+  delete request.draft.version;
+  request.viewByActor = {
+    [REVIEWER]: { draftVersion: 0, pagesSeen: [0], detailSeen: ['M01'], confirmSeen: true },
+  };
+  const list = buildRequirementCard({ request, view: view('list'), viewerId: REVIEWER });
+  const values = callbackValues(list);
+  assert.ok(values.length > 0);
+  for (const value of values) assert.equal(value.draftVersion, 0, 'every callback stamps 0');
+  assert.match(body(list), /草稿 v0/, 'the card names the version it stamped');
+
+  const confirm = buildRequirementCard({ request, view: view('confirm'), viewerId: REVIEWER });
+  const text = body(confirm);
+  assert.doesNotMatch(text, /查看范围作废/, 'a persisted 0 is not an older draft');
+  assert.match(text, /详情 1 \/ 1 张/, 'the seen range is live');
+  assert.equal(buttonFor(confirm, 'submit').disabled, false, '提交 is reachable, not cold forever');
+});
+
+test('a detail view for a story the draft no longer has falls back to the list', () => {
+  // A regeneration can delete M03 while the shared card still shows its detail.
+  // Throwing there means Task 10 cannot update the card at all, so the group keeps
+  // staring at a dead story: render the list and say what happened.
+  const request = targetRequest({ draft: draftWith([storyAt(0), storyAt(1)]) });
+  request.draft.version = 4;
+  withSeen(request, ['M01', 'M02']);
+  const card = buildRequirementCard({ request, view: view('detail', { storyKey: 'M03' }), viewerId: REVIEWER });
+  fits(card);
+  const text = body(card);
+  assert.match(text, /该子单 M03 已在 v4 中不存在，请从清单重新选择/);
+  assert.match(text, /子单清单 第 1 \/ 1 页/, 'the card is a list again');
+  assert.match(card.header.subtitle.content, /^子单清单 · v4 ·/, 'and the header says what it really is');
+  assert.ok(actions(card).includes('detail'), 'a live story can still be opened from here');
+  assert.ok(actions(card).includes('confirm'), 'and the way to the confirm page is there');
+  for (const value of callbackValues(card)) assert.equal(value.draftVersion, 4, 'still the current version');
+
+  // A detail view with no story to name is a malformed view, not a stale one.
+  assert.throws(() => buildRequirementCard({
+    request, view: view('detail', { storyKey: '' }), viewerId: REVIEWER,
+  }), (error) => error.code === 'UNKNOWN_STORY');
 });

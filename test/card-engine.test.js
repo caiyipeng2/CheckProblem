@@ -8,6 +8,15 @@ import { initialState, loadState, saveState } from '../src/state.js';
 import { buildQueryCard } from '../src/cards.js';
 import { createWorkSlot } from '../src/work-slot.js';
 
+// A state that never arrives has to fail the test instead of hanging the suite.
+async function waitFor(predicate, what) {
+  for (let attempt = 0; attempt < 10000; attempt += 1) {
+    if (predicate()) return;
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  assert.fail(`timed out waiting for ${what}`);
+}
+
 const message = (id, text, t = 10, sender = 'ou_member') => ({
   message_id: id, create_time: String(t), msg_type: 'text', sender: { id: sender },
   body: { content: JSON.stringify({ text }) },
@@ -386,7 +395,7 @@ test('running and terminal cards cannot be edited or started again', async () =>
   const start = h.event('start');
   h.engine.enqueueCardAction(start);
   const tick = h.engine.tick();
-  while (h.state.job?.status !== 'running') await new Promise((r) => setImmediate(r));
+  await waitFor(() => h.state.job?.status === 'running', 'the analysis to reach running');
   h.engine.enqueueCardAction(start);
   h.engine.enqueueCardAction(h.event('project', 'gear'));
   await h.engine.tick();
@@ -531,7 +540,7 @@ test('a blocked analysis still polls the chat and routes requirement reviews', a
   await h.engine.tick();
   h.engine.enqueueCardAction(h.event('start'));
   await h.engine.tick();
-  while (h.state.job?.status !== 'running') await new Promise((resolve) => setImmediate(resolve));
+  await waitFor(() => h.state.job?.status === 'running', 'the analysis to reach running');
 
   batch = [message('om_review', '任意审核消息', 30)];
   await h.engine.tick();

@@ -73,6 +73,19 @@ const REQUEST_STATUS_LABELS = {
   completed: '已完成', partial: '部分完成', partially_completed: '部分完成',
   needs_review: '待核对', cancelled: '已取消', failed: '已失败', interrupted: '已中断',
 };
+// Why the request was last blocked, as a fixed phrase the card can repeat after
+// the one-shot notice is gone. The codes are the ones this flow writes; a code
+// outside this list is shown verbatim only if it is shape-safe, never as prose.
+const BLOCKED_REASON_LABELS = {
+  CANCELLED: '拆分已取消',
+  SLOT_BUSY: '槽位忙，分析没有开始',
+  BATCH_NOT_STARTED: '上一批次没有开始写入，可重新提交',
+  SOURCE_CHANGED: '来源文档已变更，需要重新确认',
+  READ_INTERRUPTED: '文档读取被中断，可重试',
+  ANALYZE_INTERRUPTED: '分析被中断，可重试',
+  PROJECT_UNRESOLVED: '目标项目未确定',
+};
+const BLOCKED_CODE = /^[A-Z][A-Z0-9_]{1,48}$/;
 // Anything outside this set fails closed: no button that can change the draft,
 // the target or TAPD is enabled.
 const WRITABLE_STATUSES = new Set(['draft', 'review', 'awaiting_review', 'needs_review', 'partially_completed']);
@@ -459,11 +472,26 @@ function seenSummary(state, storyCount, confirmLabel) {
   return `你的查看范围：清单 ${state.pagesSeen.size} 页，详情 ${seenDetails} / ${storyCount} 张，确认页 ${confirmLabel}`;
 }
 
+// Both places a blocked reason is written — the request itself and the selected
+// target — are read here. The line is either a fixed phrase or the code alone, so
+// a value that slipped past safeCode() still cannot carry document text or a path.
+function blockedReasonLine(request) {
+  const reason = nonEmptyString(request.blockedReason)
+    ? request.blockedReason
+    : targetOf(request).blockedReason;
+  if (!nonEmptyString(reason)) return null;
+  if (Object.hasOwn(BLOCKED_REASON_LABELS, reason)) return `上次被挡住：${BLOCKED_REASON_LABELS[reason]}`;
+  if (BLOCKED_CODE.test(reason)) return `上次被挡住：未登记原因（${reason}）`;
+  return '上次被挡住：原因未登记';
+}
+
 function commonLines(request, state, mode) {
   const out = [];
   out.push(clipTo(`文档：${state.snapshot.title ?? '未命名文档'}`, DOC_TITLE_BYTES));
   if (nonEmptyString(state.snapshot.url)) out.push(`链接：${clipTo(state.snapshot.url, DOC_TITLE_BYTES)}`);
   out.push(`草稿 v${state.version} · ${MODE_LABELS[mode]} · ${state.statusLabel}`);
+  const blocked = blockedReasonLine(request);
+  if (blocked) out.push(blocked);
   if (!state.allowed) out.push('无审核权限：可查看全部内容，所有写入按钮不会生效。');
   if (state.voided) out.push(`草稿版本已更新到 v${state.version}，此前的查看范围作废，需要重新查看。`);
   return out;

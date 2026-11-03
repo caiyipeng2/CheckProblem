@@ -7,6 +7,15 @@ import { createEngine } from '../src/index.js';
 import { initialState } from '../src/state.js';
 import { CONFIRM_PROMPT, TIMEOUT_NOTICE, CANCELLED_NOTICE, BUSY_NOTICE, WORK_BUSY_NOTICE } from '../src/reply.js';
 
+// A state that never arrives has to fail the test instead of hanging the suite.
+async function waitFor(predicate, what) {
+  for (let attempt = 0; attempt < 10000; attempt += 1) {
+    if (predicate()) return;
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  assert.fail(`timed out waiting for ${what}`);
+}
+
 // Feishu create_time is a 13-digit millisecond timestamp string.
 const NOW = 1793162767785;
 const ANALYSIS = '【结论】配置缺失，掉落表没有 reward_1001';
@@ -700,6 +709,36 @@ test('a planning command the coordinator did not consume still never falls into 
   assert.equal(h.state.job.triggerMessageId, 'om_2', 'the later plain question still works');
 });
 
+test('a planning command behind punctuation or a polite word still never enters the bug flow', async () => {
+  const requirements = requirementsStub({ handled: [] });
+  const h = harness({ requirements });
+  h.setBatch([
+    msg('om_colon', 100, '蔡龙：拆分需求 https://x.feishu.cn/docx/abc'),
+    msg('om_qing', 200, '蔡龙 请拆分需求 https://x.feishu.cn/docx/abc'),
+    msg('om_bang', 300, '蔡龙 帮我修改拆分 https://x.feishu.cn/docx/abc'),
+    msg('om_plain', 400, '蔡龙 奖励没到账'),
+  ]);
+
+  await h.engine.tick();
+
+  const planningIds = new Set(['om_colon', 'om_qing', 'om_bang']);
+  assert.ok(!h.replies.some(({ id }) => planningIds.has(id)), 'no planning variant draws a bug prompt');
+  assert.equal(h.state.job.status, 'awaiting');
+  assert.equal(h.state.job.triggerMessageId, 'om_plain', 'the trailing plain question still works');
+});
+
+test('asking about 拆分需求 is a question, not a planning command', async () => {
+  const requirements = requirementsStub({ handled: [] });
+  const h = harness({ requirements });
+  h.setBatch([msg('om_ask', 100, '蔡龙 请问拆分需求是什么')]);
+
+  await h.engine.tick();
+
+  assert.equal(h.state.job.status, 'awaiting', 'the question is not swallowed by the planning guard');
+  assert.equal(h.state.job.triggerMessageId, 'om_ask');
+  assert.deepEqual(h.replies, [{ id: 'om_ask', text: CONFIRM_PROMPT }]);
+});
+
 test('the coordinator recovery flush runs once before the first message is routed', async () => {
   const requirements = requirementsStub();
   const h = harness({ requirements });
@@ -726,7 +765,7 @@ test('a running analysis is never replaced by a new question', async () => {
   await h.engine.tick();
   h.setBatch([msg('om_1', 100, '蔡龙 奖励没到账'), msg('om_2', 200, '确认', 'ou_ops')]);
   await h.engine.tick();
-  while (h.state.job?.status !== 'running') await new Promise((resolve) => setImmediate(resolve));
+  await waitFor(() => h.state.job?.status === 'running', 'the analysis to reach running');
 
   h.setBatch([
     msg('om_1', 100, '蔡龙 奖励没到账'),

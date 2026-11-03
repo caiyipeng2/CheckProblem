@@ -194,6 +194,43 @@ test('the draft version is carried by every mode and every callback', () => {
   }
 });
 
+test('a blocked reason stays readable on the card after the one-shot notice is gone', () => {
+  // The reason is written on the request and on the selected target; either one
+  // has to reach the card, as a fixed phrase, not as free text.
+  const slotBusy = makeRequest({ blockedReason: 'SLOT_BUSY' });
+  assert.match(
+    body(buildRequirementCard({ request: slotBusy, view: view('list'), viewerId: REVIEWER })),
+    /上次被挡住：槽位忙/,
+    'the request-level reason is spelled out',
+  );
+
+  const sourceChanged = makeRequest({ target: { blockedReason: 'SOURCE_CHANGED' } });
+  assert.match(
+    body(buildRequirementCard({ request: sourceChanged, view: view('detail'), viewerId: REVIEWER })),
+    /上次被挡住：来源文档已变更/,
+    'the target-level reason is spelled out too',
+  );
+
+  const unknown = makeRequest({ blockedReason: 'SOMETHING_NEW' });
+  assert.match(
+    body(buildRequirementCard({ request: unknown, view: view('confirm'), viewerId: REVIEWER })),
+    /上次被挡住：未登记原因（SOMETHING_NEW）/,
+    'a shape-safe unknown code is shown verbatim behind a fixed prefix',
+  );
+
+  const empty = makeRequest({ blockedReason: '' });
+  assert.doesNotMatch(
+    body(buildRequirementCard({ request: empty, view: view('list'), viewerId: REVIEWER })),
+    /上次被挡住/,
+    'an empty reason draws no line',
+  );
+
+  const freeText = makeRequest({ blockedReason: '来源文档 C:/secrets/doc.md 变更了' });
+  const freeTextBody = body(buildRequirementCard({ request: freeText, view: view('list'), viewerId: REVIEWER }));
+  assert.doesNotMatch(freeTextBody, /C:\/secrets|doc\.md/, 'free text never reaches the card');
+  assert.match(freeTextBody, /上次被挡住：原因未登记/, 'only the fixed placeholder is shown');
+});
+
 test('every callback value has exactly the fixed key set', () => {
   const request = withSeen(targetRequest({
     draft: draftWith([storyAt(0, { issueIds: ['Q1'] })], {

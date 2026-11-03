@@ -93,12 +93,21 @@ export function createEngine({
   // not configured) the message must still never open a 故障排查 card, so the
   // command prefix itself is checked before the group trigger rules run.
   const PLANNING_COMMAND = /^(拆分需求|修改拆分)/;
+  // A command is often typed with a separator (`蔡龙：拆分需求`) or a politeness
+  // word (`蔡龙 请拆分需求`). Those belong to the sentence, not to the command:
+  // they are stripped before the prefix test, while a question such as
+  // `请问拆分需求是什么` still fails the test after `请` is removed (`问…`).
+  const LEADING_SEPARATORS = /^[\s:：,，、。.；;！!？?~～\-—…]+/u;
+  const POLITE_PREFIX = /^(?:请|帮我|帮忙|麻烦)+/u;
   function planningCommand(message) {
     let text = extractPlainText(message).replace(/@_user_\d+/g, ' ').trim();
     const keyword = config.triggerKeyword;
     if (typeof keyword === 'string' && keyword !== '' && text.startsWith(keyword)) {
       text = text.slice(keyword.length).trim();
     }
+    text = text.replace(LEADING_SEPARATORS, '');
+    text = text.replace(POLITE_PREFIX, '');
+    text = text.replace(LEADING_SEPARATORS, '');
     return PLANNING_COMMAND.test(text);
   }
 

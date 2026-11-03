@@ -323,6 +323,7 @@ function hasDescriptionToken(description, token) {
 
 export function createTapdStories({
   tokenFile,
+  tokenFiles = {},
   request = globalThis.fetch,
   readFile = (file) => readFileSync(file, 'utf8'),
   timeoutMs = DEFAULT_TIMEOUT_MS,
@@ -330,6 +331,14 @@ export function createTapdStories({
 } = {}) {
   if (typeof tokenFile !== 'string' || tokenFile === '') {
     throw codedError('INVALID_CONFIG', 'tapd-stories: tokenFile is required');
+  }
+  if (!tokenFiles || typeof tokenFiles !== 'object' || Array.isArray(tokenFiles)) {
+    throw codedError('INVALID_CONFIG', 'tapd-stories: tokenFiles must be an object');
+  }
+  for (const path of Object.values(tokenFiles)) {
+    if (typeof path !== 'string' || path === '') {
+      throw codedError('INVALID_CONFIG', 'tapd-stories: tokenFiles values must be non-empty paths');
+    }
   }
   if (!BASE_URL_PATTERN.test(String(baseUrl))) {
     throw codedError('INVALID_BASE_URL', 'tapd-stories: baseUrl must be https://api.tapd.cn');
@@ -339,8 +348,12 @@ export function createTapdStories({
   }
   const root = String(baseUrl).replace(/\/+$/, '');
 
-  function tokenOrFail() {
-    const token = resolveApiKey({ apiKeyEnv: '', apiKeyFile: tokenFile, readFile });
+  // A workspace may map to a different TAPD app and therefore a different
+  // token file (the runbook keeps weapon and gear on separate tokens). Fall back
+  // to the process-wide file only when the workspace has no override.
+  function tokenOrFail(workspaceId) {
+    const path = Object.hasOwn(tokenFiles, String(workspaceId)) ? tokenFiles[String(workspaceId)] : tokenFile;
+    const token = resolveApiKey({ apiKeyEnv: '', apiKeyFile: path, readFile });
     if (!token) fail('UNSENT', 'tapd-stories: 令牌文件不可读或为空');
     return token;
   }
@@ -398,7 +411,7 @@ export function createTapdStories({
     async getStory({ workspaceId, id } = {}) {
       assertId(workspaceId, 'workspaceId');
       assertId(id, 'id');
-      const token = tokenOrFail();
+      const token = tokenOrFail(workspaceId);
       const params = new URLSearchParams({
         workspace_id: workspaceId,
         id,
@@ -416,7 +429,7 @@ export function createTapdStories({
     async listChildren({ workspaceId, parentId } = {}) {
       assertId(workspaceId, 'workspaceId');
       assertId(parentId, 'parentId');
-      const token = tokenOrFail();
+      const token = tokenOrFail(workspaceId);
       return collectPages(token, workspaceId, { parent_id: parentId });
     },
 
@@ -425,7 +438,7 @@ export function createTapdStories({
       const wantedName = cleanTitle(name);
       assertId(wantedName, 'name');
       assertId(documentId, 'documentId');
-      const token = tokenOrFail();
+      const token = tokenOrFail(workspaceId);
       const { items, complete } = await collectPages(token, workspaceId, { name: wantedName });
       return {
         items: items.filter((story) => cleanTitle(story.name) === wantedName
@@ -439,7 +452,7 @@ export function createTapdStories({
       assertMarker(marker);
       assertId(workspaceId, 'workspaceId');
       assertId(parentId, 'parentId');
-      const token = tokenOrFail();
+      const token = tokenOrFail(workspaceId);
       const wantedWorkspace = workspaceId;
       const wantedParent = parentId;
       const { items, complete } = await collectPages(token, workspaceId, {
@@ -455,7 +468,7 @@ export function createTapdStories({
 
     async createStory({ workspaceId, fields } = {}) {
       assertId(workspaceId, 'workspaceId');
-      const token = tokenOrFail();
+      const token = tokenOrFail(workspaceId);
       const form = new URLSearchParams();
       for (const [key, value] of Object.entries(fields ?? {})) {
         if (value == null) continue;

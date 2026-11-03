@@ -1048,3 +1048,26 @@ test('adapter entry points refuse missing ids before any request', async () => {
     assert.deepEqual(calls, [], label);
   }
 });
+
+test('each workspace reads its own token file and unknown workspaces inherit the global one', async () => {
+  const tokens = {
+    'C:/secrets/weapon.token': 'weapon-token',
+    'C:/secrets/gear.token': 'gear-token',
+    'C:/secrets/tapd.token': 'global-token',
+  };
+  const auth = [];
+  const client = createTapdStories({
+    tokenFile: 'C:/secrets/tapd.token',
+    tokenFiles: { '59180547': 'C:/secrets/weapon.token', '70000001': 'C:/secrets/gear.token' },
+    readFile: (file) => `key：${tokens[file]}\n`,
+    request: async (url, init) => {
+      auth.push(init.headers.Authorization);
+      return response({ status: 1, data: [] });
+    },
+    timeoutMs: 1000,
+  });
+  await client.findParents({ workspaceId: '59180547', name: '总单', documentId: 'doc-1' });
+  await client.findParents({ workspaceId: '70000001', name: '总单', documentId: 'doc-1' });
+  await client.findParents({ workspaceId: '80000001', name: '总单', documentId: 'doc-1' });
+  assert.deepEqual(auth, ['Bearer weapon-token', 'Bearer gear-token', 'Bearer global-token']);
+});

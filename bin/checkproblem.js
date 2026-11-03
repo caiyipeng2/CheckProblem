@@ -123,6 +123,12 @@ if (config.requirements && !config.dryRun) {
   });
   const tapdStories = createTapdStories({
     tokenFile: config.tapd.tokenFile,
+    // A mapped workspace may use its own TAPD app/token (weapon and gear do);
+    // the story adapter picks the file by workspace on every call.
+    tokenFiles: Object.fromEntries(
+      Object.values(config.tapd.workspaces ?? {})
+        .map((workspace) => [workspace.workspaceId, workspace.tokenFile]),
+    ),
     baseUrl: config.tapd.baseUrl,
   });
   // The submitter compares a frozen batch's workspace with this map, while the

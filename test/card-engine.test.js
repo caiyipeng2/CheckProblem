@@ -979,3 +979,87 @@ test('no TAPD client means no submit path at all', async () => {
   };
   assert.equal(h.engine.enqueueCardAction(press), false);
 });
+
+function tapdPress(report, id = 'evt-tapd-img') {
+  return {
+    type: 'card.action.trigger', event_id: id, chat_id: 'oc_test',
+    message_id: report.promptMessageId, operator_id: 'ou_member', action_tag: 'button',
+    action_value: JSON.stringify({ action: 'tapd', requestId: report.requestId, revision: report.revision }),
+  };
+}
+
+test('a submit carries the group screenshots into the ticket description', async () => {
+  const created = [];
+  const uploaded = [];
+  const h = submittedHarness({
+    tapdClient: {
+      createBug: async (payload) => { created.push(payload); return { bugId: '1', url: 'u' }; },
+      uploadImage: async ({ workspaceId, file, mime }) => {
+        uploaded.push({ workspaceId, file, mime });
+        return { imageSrc: '/tfl/pictures/202611/api_59180547_1.png', htmlCode: '<img src="/tfl/pictures/202611/api_59180547_1.png"/>' };
+      },
+    },
+  });
+  // The screenshot arrives with the question, as it does in the group.
+  h.setBatch([imageMessage('om_img', 'img_v3_x', 5), message('om_question', '蔡龙 查询奖励逻辑', 10)]);
+  const report = await completeOneJob(h);
+  assert.equal(report.images.length, 1);
+
+  h.engine.enqueueCardAction(tapdPress(report));
+  await h.engine.tick();
+
+  assert.equal(uploaded.length, 1);
+  assert.equal(uploaded[0].workspaceId, '59180547');
+  assert.equal(uploaded[0].mime, 'image/png');
+  assert.equal(h.downloads.filter((entry) => entry.fileKey === 'img_v3_x').length, 2, 'analysis and submit each download once');
+  assert.equal(created.length, 1);
+  assert.ok(created[0].description.includes('【截图】<br /><img src="/tfl/pictures/202611/api_59180547_1.png"/>'));
+  assert.ok(!created[0].description.includes('本单不附带图片'));
+});
+
+test('a failed screenshot upload still files the ticket and says the image was left behind', async () => {
+  const created = [];
+  const h = submittedHarness({
+    tapdClient: {
+      createBug: async (payload) => { created.push(payload); return { bugId: '1', url: 'u' }; },
+      uploadImage: async () => { throw new Error('tapd: 图片上传失败（HTTP 502）'); },
+    },
+  });
+  h.setBatch([imageMessage('om_img2', 'img_v3_y', 5), message('om_question', '蔡龙 查询奖励逻辑', 10)]);
+  const report = await completeOneJob(h);
+
+  h.engine.enqueueCardAction(tapdPress(report, 'evt-tapd-img-2'));
+  await h.engine.tick();
+
+  assert.equal(created.length, 1, 'the ticket is never lost to a screenshot problem');
+  assert.match(created[0].description, /（另有 1 张截图，见飞书群消息 om_question，本单不附带图片）/);
+  assert.equal(h.state.reports[0].tapd.status, 'done');
+  assert.ok(h.warnings.some((line) => /截图/.test(line)), 'the operator can see why the image is missing');
+});
+
+test('a screenshot format TAPD does not accept is skipped, not uploaded', async () => {
+  const created = [];
+  let uploads = 0;
+  const h = submittedHarness({
+    lark: {
+      downloadImage: async ({ outputPath }) => {
+        const path = `${outputPath}.webp`;
+        writeFileSync(path, Buffer.from('RIFF0000WEBP', 'latin1'));
+        return { path };
+      },
+    },
+    tapdClient: {
+      createBug: async (payload) => { created.push(payload); return { bugId: '1', url: 'u' }; },
+      uploadImage: async () => { uploads += 1; return { imageSrc: '/tfl/x.png', htmlCode: '<img src="/tfl/x.png"/>' }; },
+    },
+  });
+  h.setBatch([imageMessage('om_img3', 'img_v3_z', 5), message('om_question', '蔡龙 查询奖励逻辑', 10)]);
+  const report = await completeOneJob(h);
+
+  h.engine.enqueueCardAction(tapdPress(report, 'evt-tapd-img-3'));
+  await h.engine.tick();
+
+  assert.equal(uploads, 0, 'TAPD takes png/gif/jpg/bmp only');
+  assert.equal(created.length, 1);
+  assert.match(created[0].description, /本单不附带图片/);
+});

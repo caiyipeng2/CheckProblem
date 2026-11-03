@@ -41,6 +41,14 @@ function unsentError(message) {
   return err;
 }
 
+// The request went out but TAPD refused it, or answered with something we cannot
+// use. Kept explicit so a caller never mistakes it for a provably-unsent failure.
+function sentError(message) {
+  const err = new Error(message);
+  err.unsent = false;
+  return err;
+}
+
 function appendLine(target, value) {
   if (value === '') return target;
   return target === '' ? value : `${target}\n${value}`;
@@ -131,7 +139,17 @@ function assembleDescription({ body, analysisBlock, foot }) {
   return `${clip(analysisBlock, Math.max(0, DESCRIPTION_LIMIT - foot.length - BR.length))}${BR}${foot}`;
 }
 
-export function buildBugPayload({ report, entry, projects = [] }) {
+// The uploaded images arrive as HTML tags made by TAPD itself; a clip that landed
+// in the middle of one would print broken markup on the ticket. The section is
+// therefore reserved out of the budget first, and only the text is clipped.
+function withScreenshots(text, attached) {
+  if (attached.length === 0) return clip(text, DESCRIPTION_LIMIT);
+  const section = `${BR}【截图】${attached.map((html) => `${BR}${html}`).join('')}`;
+  const room = DESCRIPTION_LIMIT - section.length;
+  return room > 0 ? `${clip(text, room)}${section}` : clip(text, DESCRIPTION_LIMIT);
+}
+
+export function buildBugPayload({ report, entry, projects = [], imageHtml = [] }) {
   const parts = parseAnalysis(report.analysis);
   // The analysis is the reason this ticket exists. A report whose model ignored
   // the five-section contract parses to all-empty strings, which would file a
@@ -144,13 +162,15 @@ export function buildBugPayload({ report, entry, projects = [] }) {
   const name = projects.find((project) => project.id === report.projectId)?.name ?? report.projectId;
   const question = questionSection(report.question);
   const images = Array.isArray(report.images) ? report.images : [];
+  const attached = (Array.isArray(imageHtml) ? imageHtml : [])
+    .filter((html) => typeof html === 'string' && html !== '');
   const body = [
     ...(entry.device ? [`使用机型：${line(entry.device)}`, ''] : []),
     '【问题描述】', line(question), '',
     '【操作步骤】', ...steps(parts.repro).map(line), '',
     '【预期结果】', '正常', '',
     '【实际结果】', line(question),
-    ...(images.length
+    ...(images.length && attached.length === 0
       ? [line(`（另有 ${images.length} 张截图，见飞书群消息 ${report.triggerMessageId}，本单不附带图片）`)]
       : []),
   ].join(BR);
@@ -170,7 +190,7 @@ export function buildBugPayload({ report, entry, projects = [] }) {
     title: clip(`[${name}] ${firstClause(parts.conclusion)}`, TITLE_LIMIT),
     // Last-resort guard only: assembleDescription already hands back something that
     // fits, so this clip is a no-op unless a future edit breaks the budget maths.
-    description: clip(assembleDescription({ body, analysisBlock, foot }), DESCRIPTION_LIMIT),
+    description: withScreenshots(assembleDescription({ body, analysisBlock, foot }), attached),
     ...entry.fields,
   };
 }
@@ -183,6 +203,7 @@ export function createTapdClient({
   baseUrl = DEFAULT_BASE_URL,
   request = globalThis.fetch,
   readFile = (file) => readFileSync(file, 'utf8'),
+  readFileBinary = (file) => readFileSync(file),
   log = null,
   timeoutMs = DEFAULT_TIMEOUT_MS,
 } = {}) {
@@ -223,6 +244,53 @@ export function createTapdClient({
       // group text and has no business in a log file.
       log?.info?.(`tapd: bug ${bugId} created in workspace ${payload.workspace_id}`);
       return { bugId: String(bugId), url: bugUrl(String(payload.workspace_id), String(bugId)) };
+    },
+
+    // A ticket body may only show images TAPD itself hosts, so each screenshot is
+    // uploaded first and the html_code it returns is embedded in the description.
+    // The endpoint answers `status: 1` even when no usable file arrived (it hands
+    // back "/tfl/"), hence the shape check on image_src.
+    async uploadImage({ workspaceId, file, mime = 'image/png', tokenFile: override } = {}) {
+      const token = resolveApiKey({ apiKeyEnv: '', apiKeyFile: override ?? tokenFile, readFile });
+      if (!token) throw unsentError('tapd: 令牌文件不可读或为空');
+      if (typeof file !== 'string' || file === '') throw unsentError('tapd: 截图文件缺失');
+
+      const form = new FormData();
+      form.append('workspace_id', String(workspaceId));
+      form.append(
+        'image',
+        new Blob([readFileBinary(file)], { type: mime }),
+        String(file).split(/[\\/]/).pop() || 'screenshot.png',
+      );
+
+      const res = await request(`${baseUrl}/files/upload_image`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}` },
+        body: form,
+        signal: AbortSignal.timeout(timeoutMs),
+      });
+      const text = await res.text();
+      let parsed = null;
+      try {
+        parsed = JSON.parse(text);
+      } catch {
+        // Same as createBug: an unknown route answers with an HTML login page.
+      }
+      const imageSrc = parsed?.data?.image_src;
+      const htmlCode = parsed?.data?.html_code;
+      if (
+        parsed?.status !== 1
+        || typeof imageSrc !== 'string'
+        || !/^\/tfl\/.+\.[A-Za-z0-9]+$/.test(imageSrc)
+        || typeof htmlCode !== 'string'
+        || !htmlCode.includes('<img')
+      ) {
+        const info = typeof parsed?.info === 'string' ? clip(parsed.info, INFO_LIMIT) : '';
+        throw sentError(`tapd: 图片上传失败（HTTP ${res.status}${info ? ` ${info}` : ''}）`);
+      }
+      // The path is TAPD's, not the operator's; the local file name stays out.
+      log?.info?.(`tapd: screenshot uploaded to workspace ${String(workspaceId).slice(0, 20)}`);
+      return { imageSrc, htmlCode };
     },
   };
 }

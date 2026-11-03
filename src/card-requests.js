@@ -2,8 +2,12 @@ import { randomUUID } from 'node:crypto';
 import { buildBranchOptions, buildQueryCard } from './cards.js';
 import { matchProject } from './projects.js';
 import { buildBugPayload } from './tapd.js';
+import { clearImages, collectImages, imageDirFor } from './images.js';
 
 const REPORT_LIMIT = 20;
+// TAPD's image upload accepts these only; src/images.js also keeps webp because
+// the model gateways take it, so the ticket path filters again.
+const TAPD_IMAGE_MIMES = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/bmp']);
 
 export function createCardRequests({ config, state, lark, listBranches, clock, saveState, log, runJob, tapd = null }) {
   const queue = [];
@@ -169,6 +173,42 @@ export function createCardRequests({ config, state, lark, listBranches, clock, s
     await retryTerminalUpdates();
   }
 
+  // The downloaded screenshots are gone by the time the operator presses submit
+  // (the analysis clears them), so they are fetched again from the message that
+  // carried them and uploaded to TAPD, which only shows images from its own
+  // storage. Every failure here is soft: a ticket with a note beats no ticket.
+  async function uploadScreenshots(report, entry) {
+    const refs = Array.isArray(report.images) ? report.images : [];
+    if (refs.length === 0) return [];
+    if (typeof tapd?.uploadImage !== 'function' || typeof lark?.downloadImage !== 'function') return [];
+
+    const dir = imageDirFor(config.paths.imagesDir, `${report.requestId}-tapd`);
+    try {
+      const files = await collectImages({ refs, dir, download: lark.downloadImage, log });
+      const html = [];
+      for (const file of files) {
+        if (!TAPD_IMAGE_MIMES.has(file.mime)) {
+          log?.warn?.(`tapd: 截图格式 ${file.mime} 不受支持，已跳过`);
+          continue;
+        }
+        try {
+          const uploaded = await tapd.uploadImage({
+            workspaceId: entry.workspaceId,
+            file: file.path,
+            mime: file.mime,
+            tokenFile: entry.tokenFile,
+          });
+          if (uploaded?.htmlCode) html.push(uploaded.htmlCode);
+        } catch (err) {
+          log?.warn?.(`tapd: 截图上传失败：${err?.message ?? err}`);
+        }
+      }
+      return html;
+    } finally {
+      clearImages(dir);
+    }
+  }
+
   async function submitTapd(event) {
     const report = (state.reports ?? []).find((item) => item.requestId === event.requestId);
     if (!report) return;
@@ -187,8 +227,9 @@ export function createCardRequests({ config, state, lark, listBranches, clock, s
     // is unknown after the restart instead of silently offering the button.
     await publishCard(report);
     try {
+      const imageHtml = await uploadScreenshots(report, entry);
       const { bugId, url } = await tapd.createBug(
-        buildBugPayload({ report, entry, projects: config.projects }),
+        buildBugPayload({ report, entry, projects: config.projects, imageHtml }),
         { tokenFile: entry.tokenFile },
       );
       report.tapd = { status: 'done', bugId, url, at: clock() };

@@ -277,3 +277,87 @@ test('plain http base urls are refused at construction', () => {
   assert.throws(() => createTapdClient({ tokenFile: 'x', baseUrl: 'http://api.tapd.cn', request: async () => response({}) }), /https/);
   assert.throws(() => createTapdClient({ tokenFile: 'x', baseUrl: 'https://evil.example.com', request: async () => response({}) }), /api\.tapd\.cn/);
 });
+
+// The group screenshot is the evidence the ticket is filed for, so it must reach
+// TAPD as a real image. TAPD renders `description` as HTML and only serves images
+// uploaded to its own storage, hence the html_code the upload endpoint returns.
+const IMAGE_HTML = '<img src="/tfl/pictures/202611/api_59180547_1.png"/>';
+
+test('payload embeds uploaded screenshots and drops the not-attached note', () => {
+  const description = buildBugPayload({
+    report, entry, projects, imageHtml: [IMAGE_HTML],
+  }).description;
+  assert.ok(description.includes(`【截图】<br />${IMAGE_HTML}`), 'the TAPD-hosted image lands in the description');
+  assert.ok(!description.includes('本单不附带图片'), 'a ticket that carries the image does not say it left it behind');
+});
+
+test('payload never cuts an image tag in half when the text is clipped', () => {
+  const description = buildBugPayload({
+    report: { ...report, question: '很长的问题'.repeat(2000) },
+    entry,
+    projects,
+    imageHtml: [IMAGE_HTML, IMAGE_HTML],
+  }).description;
+  assert.ok(description.length <= 6000, 'the hard ticket limit still holds');
+  const tags = description.match(/<img src="\/tfl\/pictures\/202611\/api_59180547_1\.png"\/>/g) ?? [];
+  assert.equal(tags.length, 2, 'both image tags survive whole');
+  assert.match(description, /【蔡龙自动分析】/, 'the analysis block is still there');
+});
+
+test('uploadImage posts the screenshot as multipart and returns the image html', async () => {
+  const calls = [];
+  const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3]);
+  const client = createTapdClient({
+    tokenFile: 'C:/secrets/tapd.token',
+    readFile: () => `key：${TOKEN}\n`,
+    readFileBinary: () => png,
+    request: async (url, init) => {
+      calls.push({ url, init });
+      return response({
+        status: 1,
+        info: 'success',
+        data: { image_src: '/tfl/pictures/202611/api_59180547_1.png', html_code: IMAGE_HTML },
+      });
+    },
+  });
+
+  const result = await client.uploadImage({ workspaceId: '59180547', file: 'C:/tmp/image-1.png', mime: 'image/png' });
+
+  assert.deepEqual(result, { imageSrc: '/tfl/pictures/202611/api_59180547_1.png', htmlCode: IMAGE_HTML });
+  assert.equal(calls.length, 1);
+  assert.match(calls[0].url, /^https:\/\/api\.tapd\.cn\/files\/upload_image$/);
+  assert.equal(calls[0].init.method, 'POST');
+  assert.equal(calls[0].init.headers.Authorization, `Bearer ${TOKEN}`);
+  assert.ok(calls[0].init.body instanceof FormData, 'the file needs a multipart body, not a urlencoded form');
+  assert.equal(calls[0].init.body.get('workspace_id'), '59180547');
+  const image = calls[0].init.body.get('image');
+  assert.equal(image.name, 'image-1.png');
+  assert.equal(image.type, 'image/png');
+});
+
+test('uploadImage refuses a success envelope that carries no real image path', async () => {
+  const client = createTapdClient({
+    tokenFile: 'C:/secrets/tapd.token',
+    readFile: () => TOKEN,
+    readFileBinary: () => Buffer.from([1]),
+    // The endpoint answers this shape when the request carried no usable file.
+    request: async () => response({ status: 1, info: 'success', data: { image_src: '/tfl/', html_code: '<img src="/tfl/"/>' } }),
+  });
+  const err = await client.uploadImage({ workspaceId: '59180547', file: 'C:/tmp/a.png', mime: 'image/png' }).catch((e) => e);
+  assert.match(err.message, /图片上传失败/);
+  assert.equal(err.unsent, false, 'a request was sent; the caller must not claim otherwise');
+});
+
+test('uploadImage with an unreadable token never touches the network', async () => {
+  const calls = [];
+  const client = createTapdClient({
+    tokenFile: 'C:/empty/tapd.token',
+    readFile: () => '  \n',
+    readFileBinary: () => Buffer.from([1]),
+    request: async (url) => { calls.push(url); return response({ status: 1, data: {} }); },
+  });
+  const err = await client.uploadImage({ workspaceId: '1', file: 'C:/tmp/a.png', mime: 'image/png' }).catch((e) => e);
+  assert.match(err.message, /令牌/);
+  assert.equal(err.unsent, true);
+  assert.deepEqual(calls, []);
+});

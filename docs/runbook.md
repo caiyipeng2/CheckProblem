@@ -159,7 +159,7 @@ node bin/checkproblem.js --config D:\path\config.local.json
   },
   "workspaces": {
     "weapon": { "workspaceId": "59180547" },
-    "digit": { "workspaceId": "52360842", "fields": { "versionReport": "版本1" } },
+    "digit": { "workspaceId": "52360842", "fields": { "versionReport": "每周迭代版本" } },
     "gear": {
       "workspaceId": "47943302",
       "tokenFile": "C:/Users/EDY/.checkproblem/tapd-gear.token",
@@ -177,7 +177,7 @@ node bin/checkproblem.js --config D:\path\config.local.json
 | `tapd.workspaces.<项目id>` | 该项目对应的 TAPD workspace，`workspaceId` 必填；key 必须是已配置的项目 id |
 | `...workspaces.<id>.tokenFile` | 可选，覆盖默认令牌文件：齿轮这类项目用的是另一份令牌 |
 | `...workspaces.<id>.device` | 可选，覆盖该项目的「使用机型」 |
-| `...workspaces.<id>.fields` | 可选，按项目覆盖 `tapd.fields`（例如数字门的发现版本候选只有「版本1」） |
+| `...workspaces.<id>.fields` | 可选，按项目覆盖 `tapd.fields`（发现版本这类候选值各项目不同，先查 `get_fields_info` 再填） |
 | `tapd.baseUrl` | 可选，只允许 `https://api.tapd.cn`，一般不写 |
 
 令牌文件按项目读取：先看 workspace 的 `tokenFile`，没有才用 `tapd.tokenFile`。服务每次提单时现读，换令牌不用重启。**令牌文件只放在仓库外，绝不提交**；路径可以出现在配置和日志里，令牌本身不会进日志、错误消息、卡片或进程参数。

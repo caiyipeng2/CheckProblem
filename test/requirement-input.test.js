@@ -93,6 +93,22 @@ test('two distinct documents are both retained', () => {
   assert.deepEqual(result.documents.map((doc) => [doc.kind, doc.token]), [['docx', 'abc'], ['wiki', 'def']]);
 });
 
+test('the poller hands mentions back as a flat open_id string', () => {
+  // im/v1/messages returns `mentions[].id` as the id itself plus `id_type`,
+  // not the nested `{ open_id }` shape used by message events.
+  const flatBot = { id: BOT, id_type: 'open_id', key: '@_user_1', name: '蔡龙' };
+  const start = textMsg(`@_user_1 拆分需求 ${DOCX}`, { mentions: [flatBot] });
+  assert.deepEqual(classifyRequirementMessage(start, startOptions).documents.map((doc) => doc.token), [
+    'OCgddiDEfo9jojxG5v1cMsh5n1w',
+  ]);
+
+  const flatOther = { id: 'ou_other', id_type: 'open_id', key: '@_user_1', name: '其他机器人' };
+  assert.equal(
+    classifyRequirementMessage(textMsg(`@_user_1 拆分需求 ${DOCX}`, { mentions: [flatOther] }), startOptions),
+    null,
+  );
+});
+
 test('a plain document link without the bot mention never starts a split', () => {
   assert.equal(classifyRequirementMessage(
     textMsg(`拆分需求 ${DOCX}`), startOptions,

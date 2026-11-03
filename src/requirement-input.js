@@ -55,10 +55,19 @@ function messageParts(message) {
   return { text: out.texts.join(''), urls: out.urls, atIds: out.atIds };
 }
 
+// Message events nest the id as `{ open_id }`, while the im/v1/messages poll
+// returns a flat id string plus `id_type`. Both feed the same classifier.
+function mentionOpenId(mention) {
+  if (typeof mention?.id === 'string') {
+    return mention.id_type === undefined || mention.id_type === 'open_id' ? mention.id : null;
+  }
+  return mention?.id?.open_id ?? null;
+}
+
 function hasBotMention(message, parts, selfOpenId) {
   if (typeof selfOpenId !== 'string' || selfOpenId === '') return false;
   const mentions = Array.isArray(message?.mentions) ? message.mentions : [];
-  return mentions.some((mention) => mention?.id?.open_id === selfOpenId)
+  return mentions.some((mention) => mentionOpenId(mention) === selfOpenId)
     || parts.atIds.includes(selfOpenId);
 }
 

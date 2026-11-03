@@ -129,7 +129,7 @@ test('askChat stops after the retry budget and keeps the last HTTP error', async
     }),
     /HTTP 502.*upstream down/s,
   );
-  assert.equal(calls, 3);
+  assert.equal(calls, 5);
 });
 test('askChat does not retry a client error', async () => {
   let calls = 0;

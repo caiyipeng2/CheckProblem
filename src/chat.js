@@ -70,7 +70,7 @@ export async function askChat({
   apiKey,
   timeoutMs = DEFAULT_TIMEOUT_MS,
   fetchImpl = globalThis.fetch,
-  retries = 2,
+  retries = 4,
   retryDelayMs = 2_000,
 }) {
   if (!baseUrl) throw new Error('chat 引擎缺少 baseUrl');
@@ -131,7 +131,7 @@ export async function askChat({
         // briefly turns that into a slow answer instead of a dead analysis.
         const transient = TRANSIENT_STATUS.has(err?.status) || err?.cause !== undefined;
         if (!transient || attempt >= retries) throw err;
-        await new Promise((resolve) => setTimeout(resolve, retryDelayMs));
+        await new Promise((resolve) => setTimeout(resolve, Math.min(retryDelayMs * 2 ** attempt, 15_000)));
       }
     }
   } finally {

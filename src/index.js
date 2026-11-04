@@ -13,9 +13,12 @@ import { join } from 'node:path';
 import { extractPlainText, extractImageKeys, hasTrigger, classifyConfirmation, isUnseen } from './trigger.js';
 import { markSeen } from './state.js';
 import { buildPrompt } from './analyze.js';
-import { CONFIRM_PROMPT, TIMEOUT_NOTICE, CANCELLED_NOTICE, BUSY_NOTICE, clipForReply } from './reply.js';
+import {
+  CONFIRM_PROMPT, TIMEOUT_NOTICE, CANCELLED_NOTICE, BUSY_NOTICE, WORK_BUSY_NOTICE, clipForReply,
+} from './reply.js';
 import { createCardRequests } from './card-requests.js';
 import { clearImages, collectImages, imageDirFor, uniqueRefs } from './images.js';
+import { createWorkSlot } from './work-slot.js';
 
 // Enough for a busy chat plus the context window. The brief's
 // max(20, contextMessages + 5) was replaced by a fixed page: context never
@@ -40,10 +43,35 @@ function contextLine(msg) {
   return `${who}: ${extractPlainText(msg).trim().slice(0, CONTEXT_LINE_CHARS)}`;
 }
 
-export function createEngine({ config, lark, syncRepo, runAnalysis, state, clock, log, saveState, retrieve, listBranches, tapd = null }) {
+export function createEngine({
+  config, lark, syncRepo, runAnalysis, state, clock, log, saveState, retrieve, listBranches,
+  tapd = null, slot = null, requirements = null,
+}) {
+  // One heavy-work slot for the whole process: 故障排查 and 需求拆分 share it, so
+  // the entry point creates it once and hands the very same object to both.
+  const workSlot = slot ?? createWorkSlot({ log });
+  // A card press accepted before the crash-recovery pass of this process has run
+  // would flip the job to `running` and be mistaken for an interrupted one. The
+  // cards stay idle on `start` until the pass below opens the gate.
+  let startReady = false;
   const cards = config.projects ? createCardRequests({
     config, state, lark, listBranches, clock, saveState, log, runJob, tapd,
+    slot: workSlot, canStart: () => startReady,
   }) : null;
+
+  // Analyses started from the poll loop run in the background (one tick must not
+  // block the group for minutes), so the engine keeps their promises for
+  // whenIdle() — once mode and shutdown wait here.
+  const runTasks = new Set();
+  function trackRun(done) {
+    const settled = Promise.resolve(done).then(() => true, (err) => {
+      log?.error?.(`analysis job failed: ${err?.message ?? err}`);
+      return false;
+    });
+    runTasks.add(settled);
+    settled.then(() => runTasks.delete(settled));
+    return settled;
+  }
   const isServiceMessage = (message) => cards
     ? message?.sender?.sender_type === 'app'
     : senderId(message) === config.selfOpenId;
@@ -58,6 +86,43 @@ export function createEngine({ config, lark, syncRepo, runAnalysis, state, clock
     const before = job.images?.length ?? 0;
     job.images = uniqueRefs([...(job.images ?? []), ...imageRefsOf(message)]);
     return job.images.length - before;
+  }
+
+  // A planning command belongs to 需求拆分 only. The coordinator consumes it when
+  // it can act on it; when it cannot (no document, sender not allowed, feature
+  // not configured) the message must still never open a 故障排查 card, so the
+  // command prefix itself is checked before the group trigger rules run.
+  const PLANNING_COMMAND = /^(拆分需求|修改拆分)/;
+  // A command is often typed with a separator (`蔡龙：拆分需求`) or a politeness
+  // word (`蔡龙 请拆分需求`). Those belong to the sentence, not to the command:
+  // they are stripped before the prefix test, while a question such as
+  // `请问拆分需求是什么` still fails the test after `请` is removed (`问…`).
+  const LEADING_SEPARATORS = /^[\s:：,，、。.；;！!？?~～\-—…]+/u;
+  const POLITE_PREFIX = /^(?:请|帮我|帮忙|麻烦)+/u;
+  function planningCommand(message) {
+    let text = extractPlainText(message).replace(/@_user_\d+/g, ' ').trim();
+    const keyword = config.triggerKeyword;
+    if (typeof keyword === 'string' && keyword !== '' && text.startsWith(keyword)) {
+      text = text.slice(keyword.length).trim();
+    }
+    text = text.replace(LEADING_SEPARATORS, '');
+    text = text.replace(POLITE_PREFIX, '');
+    text = text.replace(LEADING_SEPARATORS, '');
+    return PLANNING_COMMAND.test(text);
+  }
+
+  // Every unread message is offered to the requirement coordinator first: it is
+  // the only owner of that workflow, and `true` means it consumed the message.
+  async function requirementConsumed(message) {
+    if (!requirements || typeof requirements.handleMessage !== 'function') return false;
+    try {
+      return (await requirements.handleMessage(message)) === true;
+    } catch (err) {
+      // A broken requirement step must not cost the bug flow its poll; the
+      // planning-command guard below still keeps the command out of it.
+      log?.error?.(`requirement message handling failed: ${err?.message ?? err}`);
+      return false;
+    }
   }
   let inFlight = false;
   let firstTick = true;
@@ -178,9 +243,28 @@ export function createEngine({ config, lark, syncRepo, runAnalysis, state, clock
       await lark.reply(triggerMessageId, `分析失败：${message.slice(0, 200)}`);
     } finally {
       clearImages(imagesDir);
-      state.job = null;
-      saveState(state);
+      // Only this job may clear the slot in the state file: a finished analysis
+      // must never wipe a job that was created after it (the background run no
+      // longer holds the poll loop, so that interleaving is now reachable).
+      if (state.job === job) {
+        state.job = null;
+        saveState(state);
+      }
     }
+  }
+
+  // The legacy (text-confirm) flow takes the very same slot as the card flow:
+  // the reservation comes first, and only an accepted one lets the job leave
+  // `awaiting`. A refusal keeps the confirmation pending and says why.
+  function startLegacyJob(message) {
+    const job = state.job;
+    const owner = `bug:${job?.requestId ?? job?.triggerMessageId ?? 'legacy'}`;
+    const reservation = workSlot.tryStart(owner, () => runJob(message));
+    if (!reservation?.accepted) return false;
+    job.status = 'running';
+    saveState(state);
+    trackRun(reservation.done);
+    return true;
   }
 
   async function tick() {
@@ -215,7 +299,21 @@ export function createEngine({ config, lark, syncRepo, runAnalysis, state, clock
           }
           await notice(triggerMessageId, INTERRUPTED_NOTICE);
         }
+        // The requirement ledger recovers once, before any card event or poll may
+        // start new work for it. `flush` is idempotent and never waits for a
+        // heavy operation, so it is safe to run on the first tick even when the
+        // entry point already ran it before opening the event stream.
+        if (requirements) {
+          try {
+            await requirements.flush?.();
+          } catch (err) {
+            log?.error?.(`requirement flush failed: ${err?.message ?? err}`);
+          }
+        }
         firstTick = false;
+        // Only now may a card press start an analysis: the crash-recovery check
+        // above has already run, so a live `running` job is never misread.
+        startReady = true;
       }
 
       if (state.job?.status === 'awaiting' && now > state.job.expiresAt) {
@@ -238,6 +336,13 @@ export function createEngine({ config, lark, syncRepo, runAnalysis, state, clock
       if (state.job?.status === 'awaiting') {
         let busyNotified = false;
         for (const message of unseen) {
+          // The requirement workflow is offered every message before the bug
+          // flow looks at it; a consumed message is simply seen.
+          if (await requirementConsumed(message)) {
+            markSeen(state, message);
+            saveState(state);
+            continue;
+          }
           // A screenshot that answers the pending question is still useful after
           // the trigger, so it joins the job until the operator starts it.
           if (attachImages(state.job, message) > 0) {
@@ -247,9 +352,12 @@ export function createEngine({ config, lark, syncRepo, runAnalysis, state, clock
           const kind = state.job.card ? null : classifyConfirmation(extractPlainText(message).trim());
           if (kind === 'confirm') {
             log?.info?.(`confirmation from ${senderId(message)} for ${state.job.triggerMessageId}`);
-            await runJob(message);
+            // The analysis runs behind the work slot, not inside the tick: a
+            // long query would otherwise freeze the poll and every review.
+            const started = startLegacyJob(message);
             markSeen(state, message);
             saveState(state);
+            if (!started) await notice(state.job?.triggerMessageId ?? message.message_id, WORK_BUSY_NOTICE);
             return;
           }
           if (kind === 'cancel') {
@@ -283,9 +391,36 @@ export function createEngine({ config, lark, syncRepo, runAnalysis, state, clock
         return;
       }
 
+      // A background analysis owns the group's single job: a new question must
+      // be told to wait instead of silently replacing the running job (whose
+      // `finally` would then wipe the replacement).
+      const running = state.job?.status === 'running';
+      let runningNotified = false;
       for (const message of unseen) {
+        if (await requirementConsumed(message)) {
+          markSeen(state, message);
+          saveState(state);
+          continue;
+        }
         if (isServiceMessage(message)) continue;
         if (!hasTrigger(message, config.triggerKeyword)) continue;
+        if (planningCommand(message)) {
+          // 拆分需求/修改拆分 never belongs to the bug-query flow, even when the
+          // coordinator could not act on it (no document, sender not allowed).
+          log?.info?.(`planning command left to the requirement flow: ${message.message_id}`);
+          markSeen(state, message);
+          saveState(state);
+          continue;
+        }
+        if (running) {
+          if (!runningNotified) {
+            runningNotified = true;
+            await notice(message.message_id, WORK_BUSY_NOTICE);
+          }
+          markSeen(state, message);
+          saveState(state);
+          continue;
+        }
 
         const index = batch.indexOf(message);
         const contextMessages = batch.slice(Math.max(0, index - config.contextMessages), index);
@@ -323,5 +458,48 @@ export function createEngine({ config, lark, syncRepo, runAnalysis, state, clock
     }
   }
 
-  return { tick, enqueueCardAction: (event) => cards?.enqueue(event) ?? false };
+  // Settles when no heavy operation, requirement step or card-queue drain is
+  // pending. The entry point uses it for once mode and the bounded shutdown.
+  async function whenIdle() {
+    let guard = 0;
+    while (guard < 1000) {
+      guard += 1;
+      await Promise.allSettled([...runTasks]);
+      await requirements?.whenIdle?.();
+      await cards?.whenIdle?.();
+      if (runTasks.size === 0 && !workSlot.isBusy()) return;
+      await workSlot.whenIdle();
+    }
+    throw new Error('engine work did not settle');
+  }
+
+  // Legacy cards carry no workflow key, so only an explicit namespace routes a
+  // press to the requirement flow. A namespace this build does not know is
+  // refused outright: trying the old cards afterwards could execute a press
+  // the new flow already rejected.
+  function workflowOf(event) {
+    let value = event?.action_value;
+    if (typeof value === 'string') {
+      try {
+        value = JSON.parse(value);
+      } catch {
+        return null;
+      }
+    }
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+    return typeof value.workflow === 'string' ? value.workflow : null;
+  }
+
+  return {
+    tick,
+    whenIdle,
+    enqueueCardAction: (event) => {
+      const workflow = workflowOf(event);
+      if (workflow !== null) {
+        if (workflow !== 'requirements') return false;
+        return requirements ? requirements.enqueue(event) === true : false;
+      }
+      return cards?.enqueue(event) ?? false;
+    },
+  };
 }

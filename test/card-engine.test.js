@@ -6,6 +6,16 @@ import { join } from 'node:path';
 import { createEngine } from '../src/index.js';
 import { initialState, loadState, saveState } from '../src/state.js';
 import { buildQueryCard } from '../src/cards.js';
+import { createWorkSlot } from '../src/work-slot.js';
+
+// A state that never arrives has to fail the test instead of hanging the suite.
+async function waitFor(predicate, what) {
+  for (let attempt = 0; attempt < 10000; attempt += 1) {
+    if (predicate()) return;
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  assert.fail(`timed out waiting for ${what}`);
+}
 
 const message = (id, text, t = 10, sender = 'ou_member') => ({
   message_id: id, create_time: String(t), msg_type: 'text', sender: { id: sender },
@@ -208,6 +218,7 @@ test('project change replaces branches and a selected branch reaches sync, searc
   h.engine.enqueueCardAction(start);
   h.engine.enqueueCardAction(start);
   await h.engine.tick();
+  await h.engine.whenIdle();
   assert.deepEqual(h.calls.map(([action]) => action), ['sync', 'search', 'analysis']);
   for (const [, repo] of h.calls) {
     assert.equal(repo.dir, 'owned/gear');
@@ -234,6 +245,7 @@ test('card analysis prompt and reply use the selected project and synchronized p
   h.state.job.provenance = 'master@0000000';
   h.engine.enqueueCardAction(h.event('start'));
   await h.engine.tick();
+  await h.engine.whenIdle();
   assert.match(analysisPrompt, /齿轮 · release\/v2@fedcba9876/);
   assert.doesNotMatch(analysisPrompt, /master@0000000|develop@/);
   assert.match(h.replies.at(-1).text, /齿轮 · release\/v2@fedcba9876/);
@@ -383,14 +395,170 @@ test('running and terminal cards cannot be edited or started again', async () =>
   const start = h.event('start');
   h.engine.enqueueCardAction(start);
   const tick = h.engine.tick();
-  while (h.state.job?.status !== 'running') await new Promise((r) => setImmediate(r));
+  await waitFor(() => h.state.job?.status === 'running', 'the analysis to reach running');
   h.engine.enqueueCardAction(start);
   h.engine.enqueueCardAction(h.event('project', 'gear'));
   await h.engine.tick();
   release();
   await tick;
+  await h.engine.whenIdle();
   await h.engine.tick();
   assert.equal(h.calls.filter(([op]) => op === 'sync').length, 1);
+  assert.equal(h.state.job, null);
+});
+
+test('a start refused by the busy slot keeps the card awaiting and says why', async () => {
+  const slot = createWorkSlot();
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  const held = slot.tryStart('requirements:r_busy', () => gate);
+  assert.equal(held.accepted, true);
+
+  const h = harness({ engine: { slot } });
+  await h.engine.tick();
+  h.engine.enqueueCardAction(h.event('start'));
+  await h.engine.tick();
+
+  assert.equal(h.calls.length, 0, 'a refused start must never run a hidden query');
+  assert.equal(h.state.job.status, 'awaiting', 'the refusal leaves the card retryable');
+  assert.equal(h.state.job.revision, 0, 'the refusal changes nothing the card renders');
+  assert.match(h.replies.at(-1).text, /正在处理其他重操作/);
+
+  release();
+  await held.done;
+  assert.equal(slot.isBusy(), false);
+  h.engine.enqueueCardAction(h.event('start'));
+  await h.engine.tick();
+  await h.engine.whenIdle();
+  assert.deepEqual(h.calls.map(([action]) => action), ['sync', 'search', 'analysis']);
+});
+
+test('a card query holds the shared slot for its whole run and then releases it', async () => {
+  const slot = createWorkSlot();
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  const h = harness({ engine: {
+    slot,
+    runAnalysis: async () => { await gate; return { text: '查询结果' }; },
+  } });
+  await h.engine.tick();
+  h.engine.enqueueCardAction(h.event('start'));
+  const tick = h.engine.tick();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(slot.isBusy(), true, 'the analysis occupies the one heavy-work slot');
+  assert.equal(slot.tryStart('requirements:r_other', async () => {}).accepted, false);
+  release();
+  await tick;
+  await h.engine.whenIdle();
+  assert.equal(slot.isBusy(), false, 'the slot is released when the query settles');
+  assert.equal(h.state.job, null);
+});
+
+test('card actions route by workflow and an unknown namespace is refused outright', async () => {
+  const requirements = {
+    events: [],
+    async handleMessage() { return false; },
+    enqueue(event) { this.events.push(event); return true; },
+    async flush() {},
+    async whenIdle() {},
+  };
+  const h = harness({ engine: { requirements } });
+  await h.engine.tick();
+  const job = h.state.job;
+  const event = (value) => ({
+    type: 'card.action.trigger', event_id: 'evt-route', chat_id: 'oc_test', message_id: 'om_card',
+    operator_id: 'ou_member', action_tag: 'button', action_value: JSON.stringify(value),
+  });
+  // A requirements callback describes a `start` the legacy card would accept, so
+  // falling back after the new flow took it would be visible as a query.
+  const requirementAction = event({
+    workflow: 'requirements', action: 'start', requestId: job.requestId,
+    revision: job.revision, draftVersion: 1, key: '', page: 0,
+  });
+  assert.equal(h.engine.enqueueCardAction(requirementAction), true);
+  assert.equal(requirements.events.length, 1, 'the new flow owns its namespace');
+  const unknown = event({
+    workflow: 'notes', action: 'start', requestId: job.requestId, revision: job.revision,
+  });
+  assert.equal(h.engine.enqueueCardAction(unknown), false, 'an unknown workflow is refused');
+  await h.engine.tick();
+  assert.equal(h.calls.length, 0, 'no routed press reached the old card flow');
+  assert.equal(h.state.job.status, 'awaiting');
+});
+
+test('a start pressed before the startup recovery pass is never misread as an interrupted job', async () => {
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  const h = harness({ engine: { runAnalysis: async () => {
+    h.calls.push(['analysis', undefined]);
+    await gate;
+    return { text: '查询结果' };
+  } } });
+  h.state.job = {
+    card: true, requestId: 'r_restart', revision: 0, status: 'awaiting', projectId: 'weapon',
+    branch: 'master', branches: ['master'], question: '旧问题', triggerMessageId: 'om_old',
+    promptMessageId: 'om_card', expiresAt: 2000, images: [],
+  };
+  h.setBatch([]);
+  // The card listener opens before the first poll, so this press is drained
+  // before the crash-recovery check of the new process has run.
+  h.engine.enqueueCardAction(h.event('start'));
+  await new Promise((resolve) => setImmediate(resolve));
+  await h.engine.tick();
+
+  assert.ok(!h.replies.some(({ text }) => /上次分析中断/.test(text)), 'a live query is not a crash');
+
+  release();
+  await h.engine.whenIdle();
+  assert.deepEqual(h.calls.map(([action]) => action), ['sync', 'search', 'analysis']);
+  assert.equal(h.state.job, null);
+});
+
+test('a blocked analysis still polls the chat and routes requirement reviews', async () => {
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  const requirements = {
+    messages: [],
+    events: [],
+    async handleMessage(message) {
+      this.messages.push(message.message_id);
+      return message.message_id === 'om_review';
+    },
+    enqueue(event) { this.events.push(event); return true; },
+    async flush() {},
+    async whenIdle() {},
+  };
+  let batch = [message('om_question', '蔡龙 查询奖励逻辑', 10)];
+  let lists = 0;
+  const h = harness({
+    lark: { listMessages: async () => { lists += 1; return batch; } },
+    engine: {
+      requirements,
+      runAnalysis: async () => { await gate; return { text: '查询结果' }; },
+    },
+  });
+  await h.engine.tick();
+  h.engine.enqueueCardAction(h.event('start'));
+  await h.engine.tick();
+  await waitFor(() => h.state.job?.status === 'running', 'the analysis to reach running');
+
+  batch = [message('om_review', '任意审核消息', 30)];
+  await h.engine.tick();
+  assert.equal(lists, 3, 'the poll still lists messages while the analysis is blocked');
+  assert.ok(requirements.messages.includes('om_review'), 'the review flow still receives messages');
+
+  const review = {
+    type: 'card.action.trigger', event_id: 'evt-review', chat_id: 'oc_test', message_id: 'om_card',
+    operator_id: 'ou_member', action_tag: 'button',
+    action_value: JSON.stringify({
+      workflow: 'requirements', action: 'approve', requestId: 'req_1',
+      draftVersion: 1, key: 'M01', page: 0,
+    }),
+  };
+  assert.equal(h.engine.enqueueCardAction(review), true);
+  assert.equal(requirements.events.length, 1, 'a review press is routed while the query runs');
+  release();
+  await h.engine.whenIdle();
   assert.equal(h.state.job, null);
 });
 
@@ -399,6 +567,7 @@ test('failed repository sync never runs analysis and marks card failed', async (
   await h.engine.tick();
   h.engine.enqueueCardAction(h.event('start'));
   await h.engine.tick();
+  await h.engine.whenIdle();
   assert.equal(h.calls.length, 0);
   assert.equal(h.state.job, null);
   assert.match(JSON.stringify(h.updates.at(-1).card), /查询失败/);
@@ -410,6 +579,7 @@ test('failed running-card update prevents starting a hidden query', async () => 
   await h.engine.tick();
   h.engine.enqueueCardAction(h.event('start'));
   await h.engine.tick();
+  await h.engine.whenIdle();
   assert.equal(h.calls.length, 0);
   assert.equal(h.state.job, null);
   assert.match(h.replies.at(-1).text, /patch unavailable/);
@@ -427,6 +597,7 @@ test('a failed selection update is retried before processing another action', as
   assert.ok(!h.state.job.cardNeedsUpdate);
   h.engine.enqueueCardAction(h.event('start'));
   await h.engine.tick();
+  await h.engine.whenIdle();
   assert.equal(h.calls.filter(([op]) => op === 'sync').length, 1);
 });
 
@@ -571,6 +742,7 @@ test('screenshots around the trigger reach the card, the analysis and are cleane
 
   h.engine.enqueueCardAction(h.event('start'));
   await h.engine.tick();
+  await h.engine.whenIdle();
 
   assert.deepEqual(h.downloads.map(({ messageId, fileKey }) => [messageId, fileKey]), [
     ['om_img', 'img_v3_one'],
@@ -619,6 +791,7 @@ test('a screenshot posted while awaiting is attached once and refreshes the card
 
   h.engine.enqueueCardAction(h.event('start'));
   await h.engine.tick();
+  await h.engine.whenIdle();
   assert.deepEqual(seen.images.map((image) => image.mime), ['image/png']);
 });
 
@@ -674,6 +847,7 @@ test('at most four screenshots are attached and a failed download never blocks t
   assert.equal(h.state.job.images.length, 4);
   h.engine.enqueueCardAction(h.event('start'));
   await h.engine.tick();
+  await h.engine.whenIdle();
 
   assert.equal(calls, 4, 'only the capped refs are requested');
   assert.equal(seen.images.length, 3, 'the failed download is skipped, the rest still reach the model');
@@ -708,7 +882,8 @@ function submittedHarness(overrides = {}) {
 async function completeOneJob(h) {
   await h.engine.tick();                                // 群消息触发 -> 建卡片
   h.engine.enqueueCardAction(h.event('start'));         // 点「开始查询」
-  await h.engine.tick();                                // 跑分析 -> 查询完成 + 回填卡片
+  await h.engine.tick();                                // 查询在后台跑，tick 不再阻塞
+  await h.engine.whenIdle();                            // 等分析完成 + 回填卡片
   return h.state.reports[0];
 }
 
@@ -930,6 +1105,7 @@ test('without a workspace mapping the finished card carries no submit action', a
   await h.engine.tick();
   h.engine.enqueueCardAction(h.event('start'));
   await h.engine.tick();
+  await h.engine.whenIdle();
   assert.equal(h.state.reports.length, 1, 'the report is still remembered');
   assert.ok(!JSON.stringify(h.updates.at(-1)).includes('"action":"tapd"'));
 });
@@ -971,6 +1147,7 @@ test('no TAPD client means no submit path at all', async () => {
   await h.engine.tick();
   h.engine.enqueueCardAction(h.event('start'));
   await h.engine.tick();
+  await h.engine.whenIdle();
   const report = h.state.reports[0];
   const press = {
     type: 'card.action.trigger', event_id: 'evt-off', chat_id: 'oc_test',

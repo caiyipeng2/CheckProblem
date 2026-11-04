@@ -592,3 +592,89 @@ Tasks 2/3可并行；Tasks 5/7在Task 1通过后可分派独立人员，但统�
 计划编写时已确认：GET /stories读取示例及父子关系成功；docs +fetch返回revision、content、reference_map。需求创建、完整素材提取及卡片新增交互的契约尚未实测，本计划不声称已通过。
 
 Task 1执行时仅在此追加核实证据（官方方法/路径/字段、调用身份、脱敏响应结构、分页/限制），再落实相应适配器。若契约无法满足规格，停下调整方案，不在实现中用猜测补齐。此段是明确的前置验证门禁，不授权远端写入。
+
+### Task 1 核实结果（2026-10-31，只读）
+
+**调用身份**：TAPD 用个人访问令牌（Bearer），分别读武器店 `59180547`（`tapd.token`）与齿轮 `47943302`（`tapd-gear.token`）；
+lark-cli 用 `--as user`，由常驻 Node 进程 `spawn` 调用。全程 GET/读取，未发生任何远端写入；令牌未进入日志、argv 或本记录。
+
+**TAPD 读取（实测）**
+
+- `GET /stories?id=1159180547001004412`（总单，武器店）：200，`data[0].Story` 共 260 个字段；
+  `parent_id:"0"`、`children_id:"||…4413|…4414|…4439|…4727|…4728|…5140|…5141|…5158|…5182|…5183"`（10 个子单）、
+  `ancestor_id` 为自身、`level:"0"`、`workitem_type_id:1159180547001000025`、`templated_id:1159180547001000039`、
+  `iteration_id:"0"`、`description` 为 169 字符 HTML 且含 docx 链接。
+- `GET /stories?id=1159180547001005141`（子单）：`parent_id` 指向总单、`level:"1"`、`ancestor_id` 指向总单、
+  `workitem_type_id:1159180547001000027`、`templated_id:1159180547001000039`、`iteration_id:1159180547001000128`、
+  `description` 为 994 字符 HTML。
+- `GET /stories?parent_id=…4412&page=1&limit=200` 返回 10 条，第 2 页 0 条；与 `children_id` 声明的 10 个 id 完全一致；
+  `GET /stories/count?parent_id=…4412` 返回 `{count:10}`；`id=a,b` 逗号形式一次返回 2 条。
+- `GET /workitem_types?workspace_id=…`：武器店共 11 个类别，含 `新功能需求/story=…0025`、`开发需求/tec=…0027`（另 9 个）；
+  齿轮共 6 个类别，含 `需求/story=1147943302001000056`、`开发需求/tec=1147943302001000060`（另 4 个）。
+- `GET /stories/template_list`：武器店真实需求使用模板 `1159180547001000039`；齿轮真实需求（样例
+  `1147943302001005103`，`level:"0"`、type `…0056`）使用模板 `1147943302001000077`。
+  注意模板列表的 `default:"1"` 不等于“真实单在用”：齿轮的 `…0088` 标记为默认，实际样单用的是 `…0077`，
+  因此配置取“真实单在用”的模板 id，而不是默认标记。
+- `GET /stories?name=<子串>` 可用：精确全名查到 1 条；子串查到 9 条（含子单），需客户端按
+  `name` 全等 + `parent_id:"0"` 过滤后才能作为候选父单。
+- 该账号被拒（403，非“接口不存在”的证明，仅记录权限现状）：`/stories/get_story_fields_lable`、
+  `/stories/get_story_custom_fields_settings`。因此需求字段候选值不能在线枚举，只能由配置提供并在提交失败时按 `REJECTED` 处理。
+
+**TAPD 创建契约（官方文档级，未做写测试）**
+
+来源：`https://open.tapd.cn/document/api-doc/API文档/api_reference/story/add_story.html`（创建需求）。
+
+- `POST /stories`，表单编码，Bearer 令牌；必填仅 `workspace_id`、`name`。
+- 可选项含 `parent_id`（integer）、`workitem_type_id`（integer）、`templated_id`（integer）、`description`（string）、
+  `owner`、`cc`、`creator`、`developer`、`iteration_id`（string，默认 `"0"`）、`priority_label`（优先于已弃用的 `priority`）、
+  `module`、`version`、`category_id`、`label`、`is_apply_template_default_value`、`apply_template`。
+- 返回 `{status:1, data:{Story:{…}}, info:"success"}`；新单 `created_from:"api"`、`parent_id:"0"`、`children_id:"|"`。
+- **无幂等键**：重试即多建一张单。Api 写入权限未测；`POST` 属 Task 12 另行授权的范围。
+
+**lark-cli 在常驻 Node 进程内的读取（实测，cwd 在工作树、相对路径输出）**
+
+- 文档：`docs +fetch --doc <url|token> --as user --detail simple|full|with-ids [--scope outline --max-depth N] --json`，
+  单次 1.4–1.7s；`--detail full` 21,698 字符 / 34,018 字节，含资源标签与图片 alt；
+  `document` 返回 `content, document_id, reference_map, revision_id`（样例 revision 1583）。URL 与裸 token 等价。
+- 块结构：`title,h1,h2,h3,p,ol,li,b,grid,column,span,figure,table,colgroup,col,tbody,tr,td,img,whiteboard,sheet,source`；
+  样例含 24 张图、1 个画板、1 个内嵌表、2 个 `<source>`（xlsx 附件 761,147 B + mp4 视频 6,548,968 B）、
+  1 张 10×5 表、74 个段落、0 个 `<a>` 锚点。视频也是 `<source mime="video/mp4">`，没有 `<video>` 标签。
+- 图片/附件下载：`docs +media-preview --token <token> --output ./x --as user --json --overwrite` 成功
+  （PNG 167,041 B；xlsx 761,147 B，zip 魔数校验通过），各约 1.6–1.8s。图片的媒体 token 是 `img` 标签的
+  `src` 属性值（没有 `token` 属性）。`docs +media-download` 对图片 403、`drive +download` 对 source token 404，
+  两者都必须走 media-preview。
+- xlsx 附件内容：`drive +preview --file-token <token> --type html --output ./x --if-exists overwrite --as user --json`
+  成功（HTML 1,021,539 B，提取到 59 个文本单元格）；该文件可用预览类型为 `pdf/html/pdf_lin`，`text` 不可用。
+  HTML 是渲染结果，隐藏工作表/公式可能缺失，读取结果须记录此限制，不能宣称“按单元格精确读取”。
+- 画板：`whiteboard +export --whiteboard-token <token> --output-type preview`（JPEG 674,237 B）与
+  `--output-type raw`（JSON 63,859 B，`nodes` 55 个）均成功，1.3–1.9s。
+- 内嵌表：`sheets +csv-get --spreadsheet-token <token> --sheet-id <id> --max-chars 30000 --as user --json`，
+  返回 `annotated_csv,row_count,col_count,col_indices,actual_range,has_more,revision`（样例 A1:D17，1,063 字符，无更多页）。
+- 评论：`drive +list-comments --url <docx url> --as user --json` 成功，样例 3 条；`items[]` 含
+  `comment_id,quote,is_solved,reply_list`（完整键含 `extra`）。
+- Wiki：`drive +inspect --url <wiki url>` 解析出 `type/token/wiki_node`；`docs +fetch` 直接读 wiki URL 且不加
+  `--scope outline` 时返回**完整内容**（样例 1,808 字符，`fragment:false`；加 outline 才返回 fragment）。
+  `document_id` 与 node token 不同；`wiki +space-list`、`wiki +node-list --space-id … --page-size 50` 可用。
+- 消息线程：`lark-cli api GET /open-apis/im/v1/messages`（自测群）60 条中 33 条为回复，**全部 `parent_id == root_id`，
+  无 `thread_id`、`reply_in_thread` 均为空**；`post` 消息 body 键为 `title/content/content_v2`。
+- 当前 `extractPlainText` 会丢弃 `a` 节点文本（合成样例：总提取 12 字符，9 字符链接文本缺失），Task 2 必须补上。
+
+**对后续任务的具体调整（已并入实现前提）**
+
+- Task 2：词法解析增加 `a`/`href` 节点；文档链接从 post 的 `a` 节点与纯文本两条路提取。
+- Task 5：素材读取用 `docs +fetch --detail full` 拿块与资源标签；图片与 xlsx 原文件走 `docs +media-preview`
+  （图片 token 取 `img.src`）；xlsx 内容走 `drive +preview --type html`（记录“渲染而非按单元格”的限制）；
+  画板用 `whiteboard +export raw` 取节点、`preview` 取可见预览；内嵌表用 `sheets +csv-get`；评论用 `drive +list-comments`；
+  wiki 直接 `docs +fetch`（不加 outline scope）拿完整内容，必要时先 `drive +inspect` 解析 token；
+  视频（`source mime=video/mp4`）无可用读取器，按规格停在 `pending`，不降级为只存链接。
+- Task 7：父/子单字段固定为 `workspace_id,name,parent_id,workitem_type_id,templated_id,iteration_id,owner,cc,creator,description`
+  （可选 `priority_label/module/version/category_id`）；类型与模板 id 由配置给出（武器店 `…0025/…0027/…0039`，
+  齿轮 `…0056/…0060/…0077`）；`description` 为 HTML；不依赖字段候选接口。
+- Task 8：对账用 `GET /stories?parent_id=` 全量分页 + `/stories/count` + 描述中的幂等标记；`id=a,b` 可批量复核；
+  候选父单用 `GET /stories?name=<子串>` 缩小范围后按全名与 `parent_id:"0"` 过滤，找不到则要求配置显式父单 id。
+- Task 9/10：项目会话按 `root_id` 归属（实测无 `thread_id`）；编辑授权比较消息 `root_id` 与触发卡片的根消息。
+- 项目映射：样例文档正文不含项目名，样例总单位于武器店；实现不得写死项目，一律按配置的 project → workspace 映射。
+
+**门禁结论**：Tasks 5、7、9 的平台前提成立，可进入实现；剩下两项仍需在真实写测试（Task 12，另行授权）中确认：
+1) `POST /stories` 的实际写权限与 `parent_id` 建子单行为；2) 卡片按钮/分页/多选交互的客户端行为。任何一项在 Task 12 前
+出现与新事实冲突，按“停下调整、不猜测补齐”处理。

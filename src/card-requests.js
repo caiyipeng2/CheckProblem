@@ -3,15 +3,26 @@ import { buildBranchOptions, buildQueryCard } from './cards.js';
 import { matchProject } from './projects.js';
 import { buildBugPayload } from './tapd.js';
 import { clearImages, collectImages, imageDirFor } from './images.js';
+import { WORK_BUSY_NOTICE } from './reply.js';
+import { createWorkSlot } from './work-slot.js';
 
 const REPORT_LIMIT = 20;
 // TAPD's image upload accepts these only; src/images.js also keeps webp because
 // the model gateways take it, so the ticket path filters again.
 const TAPD_IMAGE_MIMES = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/bmp']);
 
-export function createCardRequests({ config, state, lark, listBranches, clock, saveState, log, runJob, tapd = null }) {
+export function createCardRequests({
+  config, state, lark, listBranches, clock, saveState, log, runJob, tapd = null,
+  slot = null, canStart = () => true,
+}) {
+  // The one slot shared with 需求拆分: a card start reserves it before the job
+  // leaves `awaiting`, so two heavy operations can never overlap.
+  const workSlot = slot ?? createWorkSlot({ log });
   const queue = [];
   let draining = null;
+  // Queries started behind the slot are tracked, not awaited: the drain must
+  // stay short so the poll and the review cards keep working during a query.
+  const starts = new Set();
   // A press is worth acting on the moment it arrives, so an accepted event
   // drains the queue from the event callback instead of waiting for the poll.
   const schedule = (action) => queueMicrotask(() => {
@@ -64,6 +75,26 @@ export function createCardRequests({ config, state, lark, listBranches, clock, s
     if (state.job?.requestId === job.requestId) state.job = null;
     saveState(state);
     await retryTerminalUpdates();
+  }
+
+  function trackStart(done) {
+    const settled = Promise.resolve(done).then(() => true, (err) => {
+      log?.error?.(`card query failed: ${err?.message ?? err}`);
+      return false;
+    });
+    starts.add(settled);
+    settled.then(() => starts.delete(settled));
+    return settled;
+  }
+
+  // A refusal is advisory: a recalled message or a flaky API must not change the
+  // job, which stays awaiting for the next press.
+  async function busyNotice(job) {
+    try {
+      await lark.reply(job.triggerMessageId, WORK_BUSY_NOTICE);
+    } catch (err) {
+      log?.error?.(`cannot deliver busy notice to ${job.triggerMessageId}: ${err?.message ?? err}`);
+    }
   }
 
   async function loadBranches(job) {
@@ -301,10 +332,44 @@ export function createCardRequests({ config, state, lark, listBranches, clock, s
       } else if (event.action === 'start') {
         const project = config.projects.find((p) => p.id === job.projectId);
         if (!project || !job.branch || !job.branches.includes(job.branch)) continue;
-        await runJob({ sender: { id: event.operatorId } }, { ...project, branch: job.branch });
+        if (canStart() !== true) {
+          // The startup recovery pass has not run yet. Starting now would mark
+          // the job `running` and be mistaken for a job left by a dead process,
+          // so the press waits in the queue until the poll opens the gate.
+          queue.unshift(event);
+          log?.info?.('card start deferred until startup recovery completes');
+          return;
+        }
+        // Reserve first, change the job second. A refused reservation must leave
+        // the card exactly as it was: still awaiting, same revision, no hidden
+        // query — otherwise a slot held by 需求拆分 would strand the card on
+        // 查询中 with nothing behind it.
+        const reservation = workSlot.tryStart(`bug:${job.requestId}`, () => runJob(
+          { sender: { id: event.operatorId } },
+          { ...project, branch: job.branch },
+        ));
+        if (!reservation?.accepted) {
+          await busyNotice(job);
+          continue;
+        }
+        job.status = 'running';
+        saveState(state);
+        trackStart(reservation.done);
       }
     }
   }
 
-  return { create, enqueue, processPending, update, finish };
+  // Drain anything still queued, then wait for every query started behind the
+  // slot. The engine's whenIdle() is built on this.
+  async function whenIdle() {
+    await processPending();
+    let guard = 0;
+    while (starts.size > 0) {
+      guard += 1;
+      if (guard > 1000) throw new Error('card work did not settle');
+      await Promise.allSettled([...starts]);
+    }
+  }
+
+  return { create, enqueue, processPending, update, finish, whenIdle };
 }

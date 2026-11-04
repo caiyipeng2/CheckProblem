@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join, resolve, isAbsolute } from 'node:path';
 import { normalizeProjects } from './projects.js';
+import { normalizeRequirements } from './requirement-config.js';
 
 export { normalizeProjects } from './projects.js';
 
@@ -134,20 +135,30 @@ export function loadConfig(filePath) {
   // An absent tapd block leaves config.tapd undefined, and every card and ticket
   // feature stays off.
   const tapd = normalizeTapd(raw.tapd, projects);
+  const analyze = {
+    ...DEFAULTS.analyze,
+    ...(raw.analyze ?? {}),
+    attempts:
+      Array.isArray(raw.analyze?.attempts) && raw.analyze.attempts.length > 0
+        ? raw.analyze.attempts
+        : DEFAULTS.analyze.attempts,
+  };
+  // Requirements reference the resolved projects, TAPD workspaces and attempts,
+  // so this validation must run after all three exist.
+  const requirements = normalizeRequirements(raw.requirements, {
+    projects,
+    tapd,
+    analyze: analyze.attempts,
+    root,
+  });
 
   return {
     ...DEFAULTS,
     ...raw,
     ...projectConfig,
     ...(tapd ? { tapd } : {}),
-    analyze: {
-      ...DEFAULTS.analyze,
-      ...(raw.analyze ?? {}),
-      attempts:
-        Array.isArray(raw.analyze?.attempts) && raw.analyze.attempts.length > 0
-          ? raw.analyze.attempts
-          : DEFAULTS.analyze.attempts,
-    },
+    analyze,
+    ...(requirements ? { requirements } : {}),
     repo,
     root,
     paths: {

@@ -6,6 +6,70 @@
   "pollIntervalSec": 15,
   "contextMessages": 5,
   "maxReplyChars": 4000,
+  "defaultProjectId": "weapon",
+  "projects": [
+    {
+      "id": "weapon",
+      "name": "武器店（Idle_Outpost）",
+      "url": "https://codeup.aliyun.com/5f2b9f02df9df74e36afc9ad/Idle_Outpost.git",
+      "branch": "master"
+    },
+    {
+      "id": "digit",
+      "name": "数字门（DigitDoor）",
+      "url": "https://codeup.aliyun.com/5f2b9f02df9df74e36afc9ad/DigitDoor.git",
+      "branch": "develop"
+    },
+    {
+      "id": "gear",
+      "name": "齿轮（Idle_Gear_Defence）",
+      "url": "https://codeup.aliyun.com/5f2b9f02df9df74e36afc9ad/Idle_Gear_Defence.git",
+      "branch": "develop"
+    }
+  ],
+  "tapd": {
+    "tokenFile": "C:/Users/EDY/.checkproblem/tapd.token",
+    "device": "线上安卓",
+    "workspaces": {
+      "weapon": {
+        "workspaceId": "59180547",
+        "fields": {
+          "versionReport": "每周迭代版本",
+          "te": "蔡逸鹏;",
+          "currentOwner": "小鱼;",
+          "cc": "南柯;",
+          "severity": "normal",
+          "priority": "medium",
+          "frequency": "必现"
+        }
+      },
+      "digit": {
+        "workspaceId": "52360842",
+        "fields": {
+          "versionReport": "每周迭代版本",
+          "te": "蔡逸鹏;",
+          "currentOwner": "韩鑫熠;",
+          "cc": "南柯;",
+          "severity": "normal",
+          "priority": "medium",
+          "frequency": "必现"
+        }
+      },
+      "gear": {
+        "workspaceId": "47943302",
+        "tokenFile": "C:/Users/EDY/.checkproblem/tapd-gear.token",
+        "fields": {
+          "versionReport": "每周迭代版本",
+          "te": "刘学;",
+          "currentOwner": "周俊;",
+          "cc": "彭佩;",
+          "severity": "normal",
+          "priority": "medium",
+          "frequency": "必现"
+        }
+      }
+    }
+  },
   "repo": {
     "mode": "clone",
     "dir": "repo/Idle_Outpost",
